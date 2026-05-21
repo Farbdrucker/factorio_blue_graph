@@ -154,13 +154,13 @@ Dependencies (managed by `uv add`):
 
 ### Phase 2 — Machine count MILP
 
-- [ ] `planning/lp.py::solve_machine_counts(demand, machine_choice)`:
+- [x] `planning/lp.py::solve_machine_counts(demand, machine_choice)`:
   - Variables: `m_r ∈ ℤ≥0` per recipe
   - Constraints: for each item `i`, `∑_r produces(r,i)·m_r·speed(r) ≥ ∑_r consumes(r,i)·m_r·speed(r) + external_demand(i)`
   - Objective: `min ∑_r m_r` (footprint proxy); secondary: minimize wasted production
   - Solver: PuLP with CBC backend (bundled)
-- [ ] Surface utilization per machine (`actual_rate / max_rate`) for downstream tier choice
-- [ ] Tests: known recipes (60 SPM science) cross-checked against community calculators (Kirk McDonald)
+- [x] Surface utilization per machine (`actual_rate / max_rate`) for downstream tier choice
+- [x] Tests: known recipes (60 SPM science) cross-checked against community calculators (Kirk McDonald)
 
 ### Phase 3 — Flow graph + belt tier assignment
 
