@@ -261,9 +261,9 @@ def gc_blocks(recipe_graph: RecipeHypergraph) -> BlockGraph:
 
 
 def test_full_green_circuit_pipeline_routes(gc_blocks: BlockGraph) -> None:
-    placement = place_blocks(gc_blocks, (60, 60), time_limit_s=20.0)
+    placement = place_blocks(gc_blocks, (80, 80), time_limit_s=20.0)
     res: RoutingResult = route_belts(placement, gc_blocks)
-    assert res.canvas == (60, 60)
+    assert res.canvas == (80, 80)
     assert res.status == "OK", f"unresolved edges: {res.unresolved}"
     # Every BlockEdge should be covered by a BeltPath.
     covered = {(p.source_block, p.target_block, p.item_id) for p in res.paths}

@@ -165,7 +165,14 @@ def _build_block(idx: int, members: list[MachineNode]) -> Block:
     side = math.ceil(math.sqrt(k))
     mw = max(m.machine.footprint[0] for m in sorted_members)
     mh = max(m.machine.footprint[1] for m in sorted_members)
-    footprint = (side * mw + 2 * BLOCK_MARGIN, side * mh + 2 * BLOCK_MARGIN)
+    # Reserve 1 tile of inter-machine spacing on each axis (s-1 gaps for s
+    # cells) so Phase 7 can drop a power pole on the interior gap between
+    # machines. The 2-tile outer margin is unchanged.
+    gap = max(side - 1, 0)
+    footprint = (
+        side * mw + gap + 2 * BLOCK_MARGIN,
+        side * mh + gap + 2 * BLOCK_MARGIN,
+    )
 
     return Block(
         id=block_id,

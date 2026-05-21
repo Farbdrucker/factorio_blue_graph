@@ -199,11 +199,11 @@ Dependencies (managed by `uv add`):
 
 ### Phase 7 — Inserters + power
 
-- [ ] `layout/inserter.py`: for every (belt-tile adjacent to assembler) pair on a recipe's I/O side, place inserter; choose long-handed if 2-tile reach needed
-- [ ] `layout/power.py::cover_with_poles(machines)`:
+- [x] `layout/inserter.py`: for every (belt-tile adjacent to assembler) pair on a recipe's I/O side, place inserter; choose long-handed if 2-tile reach needed. Inserter count scales with `BeltPath.rate` (promotion ladder `inserter → fast-inserter → stack-inserter`, capped by machine-face length). External raw inputs from `FlowGraph.external_in_edges` are stubbed at the canvas boundary with a single `BeltSegment` plus inserters (real routing deferred to Phase 6.5 / 11).
+- [x] `layout/power.py::cover_with_poles(machines)`:
   - Greedy set cover with medium electric poles (radius 3.5, area 7×7)
   - Variables: pole positions; constraints: every machine within radius of ≥1 pole; objective: minimize pole count
-- [ ] Tests: 4-assembler block requires exactly 1 medium pole at center
+- [x] Tests: 4-assembler block requires exactly 1 medium pole at center  *(Phase 5 dataclass extended with `machine_tiles`; Phase 4 clustering footprint formula adds `(side-1)` inter-machine spacing per axis so a single pole has a free interior tile to land on. Wire-connectivity between poles, lane-density beyond machine-face length, and routed external-input belts are deferred.)*
 
 ### Phase 8 — Multi-objective Pareto
 
