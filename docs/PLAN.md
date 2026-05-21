@@ -170,11 +170,11 @@ Dependencies (managed by `uv add`):
 
 ### Phase 4 — Block clustering
 
-- [ ] `layout/clustering.py::cluster_into_blocks(flow_graph, max_block_size=16)`:
+- [x] `layout/clustering.py::cluster_into_blocks(flow_graph, max_block_size=16)`:
   - Run Louvain modularity on `G_F` weighted by edge flow
   - Each cluster becomes a `Block` with bounding box = `ceil(sqrt(k))` × `ceil(sqrt(k))` of assembler footprint (3×3 each) plus 2-tile belt margin
   - Single-recipe blocks preferred; mixed-recipe blocks allowed only if tightly coupled
-- [ ] Tests: 8-assembler green-circuit cluster collapses to one block
+- [x] Tests: 8-assembler green-circuit cluster collapses to one block
 
 ### Phase 5 — Block placement
 
