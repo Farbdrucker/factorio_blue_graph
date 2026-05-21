@@ -178,12 +178,12 @@ Dependencies (managed by `uv add`):
 
 ### Phase 5 — Block placement
 
-- [ ] `layout/placement.py::place_blocks(block_graph, canvas)`:
-  - Primary solver: OR-Tools CP-SAT with no-overlap2d, rotation in {0°,90°,180°,270°}, bbox minimization
-  - Objective: `α · bbox_area + β · ∑_{(b,b')∈E_B} flow(b,b') · ManhattanDist(b,b')`
-  - Fallback for `len(blocks) > 30`: simulated annealing with the same objective (initial = grid pack)
-  - I/O ports: input items enter on the west edge, output items exit on the east edge (configurable)
-- [ ] Tests: 3-block toy (iron→gear→inserter) produces a left-to-right arrangement
+- [x] `layout/placement.py::place_blocks(block_graph, canvas)`:
+  - Primary solver: OR-Tools CP-SAT with no-overlap2d, rotation in {0°,90°,180°,270°} (collapsed to binary 0°/90° toggle since the other two share footprints), bbox minimization
+  - Objective: `α · bbox_perimeter + β · ∑_{(b,b')∈E_B} flow(b,b') · ManhattanDist(b,b') + γ · I/O port bias` (perimeter used as a linear proxy for the originally-specified bbox-area term to keep the CP-SAT objective LP-friendly; see module docstring)
+  - Fallback for `len(blocks) > 30`: simulated annealing seeded from a shelf packing, same scalar objective
+  - I/O ports: source blocks (in-degree 0) biased west, sink blocks (out-degree 0) biased east via the soft `γ` term
+- [x] Tests: 3-block chain produces a left-to-right arrangement; non-square block rotates to fit; full-pipeline `electronic-circuit` placement fits 60×60 with no overlaps
 
 ### Phase 6 — Belt routing
 
