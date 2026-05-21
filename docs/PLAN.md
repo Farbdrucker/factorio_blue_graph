@@ -164,9 +164,9 @@ Dependencies (managed by `uv add`):
 
 ### Phase 3 — Flow graph + belt tier assignment
 
-- [ ] `model/graph.py::FlowGraph.from_plan(plan)`: instantiate one node per machine, edges carry `(item, items_per_sec)`
-- [ ] `layout/tier.py::pick_tier(edge_flow)`: yellow=15/s, red=30/s, blue=45/s; lane splitting if flow > 45 (parallel belts)
-- [ ] Tests: high-throughput edges split into N parallel lanes
+- [x] `model/graph.py::FlowGraph.from_plan(plan)`: instantiate one node per machine, edges carry `(item, items_per_sec)`
+- [x] `layout/tier.py::pick_tier(edge_flow)`: yellow=15/s, red=30/s, blue=45/s; lane splitting if flow > 45 (parallel belts)
+- [x] Tests: high-throughput edges split into N parallel lanes
 
 ### Phase 4 — Block clustering
 
