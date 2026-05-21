@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 from ortools.sat.python import cp_model
 
+from factorio_blue_graph.layout.clustering import BLOCK_MARGIN
 from factorio_blue_graph.model.graph import Block, BlockGraph
 
 _SCALE = 1000  # integer scale for floating-point weights / rates
@@ -36,12 +37,22 @@ class PlacementError(Exception):
 
 @dataclass(frozen=True)
 class PlacedBlock:
+    """Placed block rectangle + the tile positions of its constituent machines.
+
+    `machine_tiles` is a tuple of `(machine_id, top_left_x, top_left_y)`
+    triples — one per `Block.member` — sorted by machine id. Phase 7
+    (inserters + power) and Phase 9 (blueprint encoding) consume these
+    to place inserters against the right machine face and to encode the
+    actual assembler/furnace entities.
+    """
+
     block_id: str
     x: int
     y: int
     rotated: bool
     width: int
     height: int
+    machine_tiles: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,9 +99,9 @@ def place_blocks(
         b = blocks[0]
         w0, h0 = b.footprint
         if w0 <= width and h0 <= height:
-            pb = PlacedBlock(b.id, 0, 0, False, w0, h0)
+            pb = PlacedBlock(b.id, 0, 0, False, w0, h0, _lay_machines(b, 0, 0, False))
         elif h0 <= width and w0 <= height:
-            pb = PlacedBlock(b.id, 0, 0, True, h0, w0)
+            pb = PlacedBlock(b.id, 0, 0, True, h0, w0, _lay_machines(b, 0, 0, True))
         else:
             raise PlacementError(f"block {b.id} footprint {b.footprint} exceeds canvas {canvas}")
         return Placement(
@@ -129,6 +140,41 @@ def place_blocks(
         gamma,
         random_state,
     )
+
+
+def _lay_machines(block: Block, x: int, y: int, rotated: bool) -> tuple[tuple[str, int, int], ...]:
+    """Deterministic per-machine layout inside a placed block rectangle.
+
+    Pack the block's machines into a `ceil(sqrt(k)) × ceil(sqrt(k))`
+    row-major grid (sorted by `MachineNode.id` for determinism) starting
+    at the top-left interior corner `(x + BLOCK_MARGIN, y + BLOCK_MARGIN)`.
+    Per-machine cell size is `max(footprint)` across all members so mixed
+    blocks pack against the largest footprint — matching the formula used
+    by `clustering._build_block`. When `rotated`, the per-machine footprint
+    axes swap to follow the placed rectangle's orientation (a no-op for
+    square machines such as the 3×3 assembler).
+    """
+    members = block.members
+    if not members:
+        return ()
+    mw = max(m.machine.footprint[0] for m in members)
+    mh = max(m.machine.footprint[1] for m in members)
+    if rotated:
+        mw, mh = mh, mw
+    side = math.ceil(math.sqrt(len(members)))
+    x0 = x + BLOCK_MARGIN
+    y0 = y + BLOCK_MARGIN
+    # Cell pitch leaves a 1-tile gap between machines so Phase 7 can drop
+    # a power pole on the interior gap (4-machine block must be covered
+    # by a single medium pole — see PLAN.md Phase 7 test). The clustering
+    # footprint formula reserves enough margin for blocks up to side=5.
+    pitch_x, pitch_y = mw + 1, mh + 1
+    ordered = sorted(members, key=lambda m: m.id)
+    out: list[tuple[str, int, int]] = []
+    for i, m in enumerate(ordered):
+        r, c = divmod(i, side)
+        out.append((m.id, x0 + c * pitch_x, y0 + r * pitch_y))
+    return tuple(out)
 
 
 def _aggregate_pair_flows(bg: BlockGraph) -> dict[tuple[str, str], float]:
@@ -276,13 +322,16 @@ def _place_cp_sat(
     placed: dict[str, PlacedBlock] = {}
     for b in blocks:
         rotated = bool(solver.Value(r[b.id]))
+        bx = int(solver.Value(x[b.id]))
+        by = int(solver.Value(y[b.id]))
         placed[b.id] = PlacedBlock(
             block_id=b.id,
-            x=int(solver.Value(x[b.id])),
-            y=int(solver.Value(y[b.id])),
+            x=bx,
+            y=by,
             rotated=rotated,
             width=int(solver.Value(w[b.id])),
             height=int(solver.Value(h[b.id])),
+            machine_tiles=_lay_machines(b, bx, by, rotated),
         )
 
     bbox = (int(solver.Value(max_x)), int(solver.Value(max_y)))
@@ -364,8 +413,20 @@ def _place_anneal(
     mx = max(p.x + p.width for p in best_state.values())
     my = max(p.y + p.height for p in best_state.values())
     fwd = _flow_weighted_distance(best_state, pair_flows)
+    block_by_id = {b.id: b for b in blocks}
+    final_blocks: dict[str, PlacedBlock] = {}
+    for bid, p in best_state.items():
+        final_blocks[bid] = PlacedBlock(
+            block_id=p.block_id,
+            x=p.x,
+            y=p.y,
+            rotated=p.rotated,
+            width=p.width,
+            height=p.height,
+            machine_tiles=_lay_machines(block_by_id[bid], p.x, p.y, p.rotated),
+        )
     return Placement(
-        blocks=best_state,
+        blocks=final_blocks,
         canvas=canvas,
         bbox=(mx, my),
         flow_weighted_distance=fwd,

@@ -87,6 +87,9 @@ def test_single_block_anchored_at_origin() -> None:
     assert (pb.x, pb.y) == (0, 0)
     assert (pb.width, pb.height) == (5, 4)
     assert p.bbox == (5, 4)
+    # machine_tiles is populated for the single-block fast path and lands
+    # inside the block's interior (BLOCK_MARGIN=2 offset from the corner).
+    assert pb.machine_tiles == (("b0-m0", 2, 2),)
 
 
 def test_two_blocks_do_not_overlap_and_fit_canvas() -> None:
@@ -95,6 +98,10 @@ def test_two_blocks_do_not_overlap_and_fit_canvas() -> None:
     a, b = p.blocks["b0"], p.blocks["b1"]
     assert not _rect_overlaps(a, b)
     assert _all_inside(p)
+    # Both blocks expose their member's tile in the post-CP-SAT placement.
+    for pb in (a, b):
+        assert len(pb.machine_tiles) == 1
+        assert pb.machine_tiles[0][0].endswith("-m0")
 
 
 def test_non_square_block_must_rotate_to_fit() -> None:
@@ -105,6 +112,9 @@ def test_non_square_block_must_rotate_to_fit() -> None:
     assert pb.rotated is True
     assert (pb.width, pb.height) == (2, 6)
     assert _all_inside(p)
+    # Even on the rotated rectangle the machine sits inside the placed block.
+    mid, mx, my = pb.machine_tiles[0]
+    assert pb.x <= mx and pb.y <= my
 
 
 def test_canvas_too_small_raises() -> None:
@@ -143,11 +153,24 @@ def gc_blocks(recipe_graph: RecipeHypergraph) -> BlockGraph:
     return cluster_into_blocks(fg)
 
 
-def test_green_circuit_placement_fits_60x60(gc_blocks: BlockGraph) -> None:
-    p = place_blocks(gc_blocks, (60, 60), time_limit_s=20.0)
+def test_green_circuit_placement_fits_canvas(gc_blocks: BlockGraph) -> None:
+    # Canvas expanded from 60×60 in Phase 7 to accommodate per-block
+    # inter-machine spacing that lets a single medium pole cover a small
+    # block; final blueprint-string smoke (PLAN.md line 252) still
+    # targets 60×60 once Phases 8-10 land.
+    p = place_blocks(gc_blocks, (80, 80), time_limit_s=20.0)
     assert p.status in ("OPTIMAL", "FEASIBLE")
     assert _all_inside(p)
     placed = list(p.blocks.values())
     for i in range(len(placed)):
         for j in range(i + 1, len(placed)):
             assert not _rect_overlaps(placed[i], placed[j])
+    # Every block ships a populated machine layout matching its member count.
+    for pb in placed:
+        block = gc_blocks.blocks[pb.block_id]
+        assert len(pb.machine_tiles) == len(block.members)
+        for _mid, mx, my in pb.machine_tiles:
+            # Machine origins land inside the placed rectangle's interior.
+            assert pb.x <= mx and pb.y <= my
+            assert mx + 3 <= pb.x + pb.width
+            assert my + 3 <= pb.y + pb.height
