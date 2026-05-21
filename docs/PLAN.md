@@ -214,10 +214,10 @@ Dependencies (managed by `uv add`):
 
 ### Phase 9 — Blueprint string export
 
-- [ ] `export/blueprint_string.py::encode(blueprint)`:
+- [x] `export/blueprint_string.py::encode(blueprint)`:
   - Build JSON per Factorio 1.1 blueprint schema (entities with `name`, `position`, `direction`)
   - `zlib.compress(json.dumps(...).encode())` → base64 → prefix `"0"`
-- [ ] Round-trip test: encode small blueprint, paste into a known decoder (`factoriolab-blueprint-decoder` Python lib if vendored, else inline decoder in tests), confirm entity list matches
+- [x] Round-trip test: encode small blueprint, paste into a known decoder (`factoriolab-blueprint-decoder` Python lib if vendored, else inline decoder in tests), confirm entity list matches
 
 ### Phase 10 — Typer CLI + Rich progress
 
