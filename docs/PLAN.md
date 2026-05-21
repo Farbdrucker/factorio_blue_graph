@@ -187,13 +187,15 @@ Dependencies (managed by `uv add`):
 
 ### Phase 6 — Belt routing
 
-- [ ] `layout/routing.py::route_belts(placement, flow_graph)`:
+- [x] `layout/routing.py::route_belts(placement, block_graph)`:
   - For each item flow (source block → sink block), find rectilinear path using A* on the routing grid
   - Cost: tile traversal + 10×crossing penalty + 5×turn penalty
-  - Multi-source/multi-sink merge via splitters: model as rectilinear Steiner tree (FLUTE-style or NetworkX `steiner_tree`)
-  - Conflict resolution: ripup-and-reroute up to `max_iters=5`; if unresolved, request a wider canvas via warning
-  - Underground belts to cross obstacles (max gap = 6 tiles yellow / 8 red / 10 blue)
-- [ ] Tests: two parallel flows route without overlap on a 20×20 canvas
+  - Multi-source/multi-sink merge via splitters: incremental sequential Steiner heuristic (trunk + branch attaches to nearest trunk tile via `Splitter`)
+  - Conflict resolution: ripup-and-reroute up to `max_iters=5`; partial routes surfaced via `RoutingResult.status == "PARTIAL"` + `unresolved` edges
+  - Underground belts to cross obstacles (max gap = 6 tiles yellow / 8 red / 10 blue), modelled as A* jump operators
+  - Block "interior" = inner machine core (1-tile inset); the outer ring of each block (drawn from the Phase 4 2-tile belt margin) is FREE for ports + transit
+  - Emits `BeltSegment` / `UndergroundBelt` / `Splitter` entities (new `model/blueprint.py`) for Phase 9 to encode
+- [x] Tests: single edge routes rectilinearly; two parallel flows route without overlap on 20×20; high-flow edge picks blue tier; obstacle forces underground; Steiner fanout emits a splitter; full green-circuit pipeline routes on 60×60
 
 ### Phase 7 — Inserters + power
 
