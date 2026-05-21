@@ -221,13 +221,13 @@ Dependencies (managed by `uv add`):
 
 ### Phase 10 — Typer CLI + Rich progress
 
-- [ ] `cli.py`: commands
+- [x] `cli.py`: commands
   - `fbg plan <item> --rate <items/min> --canvas WxH --output blueprint.txt`
   - `fbg pareto <item> --rate <items/min> --points 5`
   - `fbg recipes --search <substr>` (debug)
-- [ ] `viz/progress.py`: `rich.progress.Progress` with one task per phase; show MILP iterations, CP-SAT branches, A* expansions
-- [ ] Phase outputs streamed to stdout: "Phase 2: 18 assemblers, 4 chem plants"; "Phase 5: bbox 42×38"; "Phase 6: routed 14 belts (2 ripups)"
-- [ ] On completion, write blueprint string to file and print copy-paste hint
+- [x] `viz/progress.py`: `rich.progress.Progress` with one task per phase; show MILP iterations, CP-SAT branches, A* expansions
+- [x] Phase outputs streamed to stdout: "Phase 2: 18 assemblers, 4 chem plants"; "Phase 5: bbox 42×38"; "Phase 6: routed 14 belts (2 ripups)"
+- [x] On completion, write blueprint string to file and print copy-paste hint
 
 ### Phase 11 — Verification
 
