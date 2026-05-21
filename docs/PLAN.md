@@ -145,12 +145,12 @@ Dependencies (managed by `uv add`):
 
 ### Phase 1 — Recipe data + demand propagation
 
-- [ ] Source vanilla 1.1 recipe dump (e.g. from Factorio wiki API or community JSON); store under `src/factorio_blue_graph/data/recipes.json`
-- [ ] `model/recipe.py`: Pydantic `Item`, `Recipe` (ingredients, products, time, category), `Machine` (crafting_speed, modules, footprint)
-- [ ] `model/graph.py::RecipeHypergraph`: build from data; expose `producers_of(item)`, `consumers_of(item)`, cycle detection
-- [ ] `planning/demand.py::expand_demand(target_item, rate_per_min)`: reverse BFS through `G_R`; resolve recipe choice via user override or default (use the first/cheapest); return `dict[recipe_id, required_crafts_per_sec]`
-- [ ] Handle co-products (e.g. heavy/light oil): emit warning + require user to pin oil cracking ratios via CLI flags
-- [ ] Tests: small chains (iron-plate → gear; copper-cable → green-circuit; advanced-circuit fan-in)
+- [x] Source vanilla 1.1 recipe dump (e.g. from Factorio wiki API or community JSON); store under `src/factorio_blue_graph/data/recipes.json`
+- [x] `model/recipe.py`: Pydantic `Item`, `Recipe` (ingredients, products, time, category), `Machine` (crafting_speed, modules, footprint)
+- [x] `model/graph.py::RecipeHypergraph`: build from data; expose `producers_of(item)`, `consumers_of(item)`, cycle detection
+- [x] `planning/demand.py::expand_demand(target_item, rate_per_min)`: reverse BFS through `G_R`; resolve recipe choice via user override or default (use the first/cheapest); return `dict[recipe_id, required_crafts_per_sec]`
+- [ ] Handle co-products (e.g. heavy/light oil): emit warning + require user to pin oil cracking ratios via CLI flags  *(deferred: v1 dataset has no multi-output recipes; oil products are encoded as raw inputs)*
+- [x] Tests: small chains (iron-plate → gear; copper-cable → green-circuit; advanced-circuit fan-in)
 
 ### Phase 2 — Machine count MILP
 
