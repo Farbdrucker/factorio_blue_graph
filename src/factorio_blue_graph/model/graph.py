@@ -239,3 +239,82 @@ class FlowGraph:
     @property
     def total_machines(self) -> int:
         return len(self.nodes)
+
+
+@dataclass(frozen=True)
+class Block:
+    """A rectangular cluster of machines placed as one Phase 5 unit.
+
+    `members` are the per-machine `MachineNode` instances grouped together
+    by Phase 4. `recipes` is the sorted tuple of unique recipe ids in the
+    block; `primary_recipe` is the most-common recipe (ties broken by id).
+    `footprint` is the (width, height) tile cost computed from a square
+    pack of members plus a 2-tile belt margin on each side.
+    """
+
+    id: str
+    members: tuple[MachineNode, ...]
+    recipes: tuple[str, ...]
+    footprint: tuple[int, int]
+    primary_recipe: str
+
+    @property
+    def size(self) -> int:
+        return len(self.members)
+
+    @property
+    def is_single_recipe(self) -> bool:
+        return len(self.recipes) == 1
+
+
+@dataclass(frozen=True)
+class BlockEdge:
+    """Aggregated item flow between two `Block`s, summed over member pairs."""
+
+    item_id: str
+    source_block: str
+    target_block: str
+    rate: float
+
+
+class BlockGraph:
+    """Block-level graph: nodes are `Block`s, edges aggregate inter-block flow.
+
+    The companion `nx.MultiDiGraph` mirrors `edges` (one parallel edge per
+    item) so Phase 5 (placement) and Phase 6 (routing) can run standard
+    networkx algorithms on it.
+    """
+
+    def __init__(self) -> None:
+        self.blocks: dict[str, Block] = {}
+        self.edges: list[BlockEdge] = []
+        self.graph: nx.MultiDiGraph = nx.MultiDiGraph()
+        self._member_index: dict[str, str] = {}
+
+    def add_block(self, block: Block) -> None:
+        self.blocks[block.id] = block
+        self.graph.add_node(block.id, block=block)
+        for member in block.members:
+            self._member_index[member.id] = block.id
+
+    def add_edge(self, edge: BlockEdge) -> None:
+        self.edges.append(edge)
+        self.graph.add_edge(
+            edge.source_block,
+            edge.target_block,
+            key=edge.item_id,
+            item=edge.item_id,
+            rate=edge.rate,
+            weight=edge.rate,
+        )
+
+    def block_of(self, machine_node_id: str) -> Block:
+        return self.blocks[self._member_index[machine_node_id]]
+
+    @property
+    def block_count(self) -> int:
+        return len(self.blocks)
+
+    @property
+    def total_machines(self) -> int:
+        return sum(b.size for b in self.blocks.values())
