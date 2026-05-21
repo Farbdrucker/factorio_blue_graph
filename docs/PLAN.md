@@ -207,10 +207,10 @@ Dependencies (managed by `uv add`):
 
 ### Phase 8 — Multi-objective Pareto
 
-- [ ] `optimize/pareto.py::pareto_sweep(target_rates, k_points=5)`:
+- [x] `optimize/pareto.py::pareto_sweep(target_rates, k_points=5)`:
   - ε-constraint: fix throughput at `{target, 0.8·target, 0.6·target, ...}`, minimize footprint at each
   - Returns a list of blueprints; CLI lets user pick by index
-- [ ] Tests: sweep produces monotone (throughput↑ ⇒ footprint↑) front
+- [x] Tests: sweep produces monotone (throughput↑ ⇒ footprint↑) front
 
 ### Phase 9 — Blueprint string export
 
