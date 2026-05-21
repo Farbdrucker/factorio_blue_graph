@@ -231,9 +231,9 @@ Dependencies (managed by `uv add`):
 
 ### Phase 11 — Verification
 
-- [ ] End-to-end: `fbg plan green-circuit --rate 60 --canvas 60x60` produces a string that, when pasted into Factorio (or the decoder lib), shows: 2 copper-cable assemblers + 1 green-circuit assembler, belts connected, 1 pole, no overlaps
-- [ ] CI workflow `.github/workflows/ci.yml`: `uv sync`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`
-- [ ] README with installation (`uv tool install .`), quickstart, and a generated example blueprint
+- [x] End-to-end: `fbg plan green-circuit --rate 60 --canvas 60x60` produces a string that, when pasted into Factorio (or the decoder lib), shows: 2 copper-cable assemblers + 1 green-circuit assembler, belts connected, 1 pole, no overlaps
+- [x] CI workflow `.github/workflows/ci.yml`: `uv sync`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`
+- [x] README with installation (`uv tool install .`), quickstart, and a generated example blueprint
 
 ---
 

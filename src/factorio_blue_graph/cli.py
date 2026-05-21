@@ -23,6 +23,19 @@ from factorio_blue_graph.viz.progress import PipelineProgress
 app = typer.Typer(help="Factorio Blue Graph — plan and optimize blueprints.")
 console = Console()
 
+# Common colloquial aliases → canonical item IDs in the dataset.
+_ITEM_ALIASES: dict[str, str] = {
+    "green-circuit": "electronic-circuit",
+    "red-circuit": "advanced-circuit",
+    "blue-circuit": "processing-unit",
+    "green-science": "science-pack-1",
+    "red-science": "science-pack-2",
+}
+
+
+def _resolve_item(item: str) -> str:
+    return _ITEM_ALIASES.get(item, item)
+
 
 def _parse_canvas(canvas: str) -> tuple[int, int]:
     parts = canvas.lower().split("x")
@@ -76,6 +89,7 @@ def plan(
 
     rate_per_sec = rate / 60.0
     graph = RecipeHypergraph.load_default()
+    item = _resolve_item(item)
 
     if item not in graph:
         console.print(f"[red]unknown item:[/] {item!r}")
@@ -201,6 +215,7 @@ def pareto(
 
     rate_per_sec = rate / 60.0
     graph = RecipeHypergraph.load_default()
+    item = _resolve_item(item)
 
     if item not in graph:
         console.print(f"[red]unknown item:[/] {item!r}")
@@ -276,6 +291,7 @@ def recipes(
     graph = RecipeHypergraph.load_default()
 
     if show:
+        show = _resolve_item(show)
         if show not in graph:
             console.print(f"[red]unknown item:[/] {show}")
             raise typer.Exit(code=1)
