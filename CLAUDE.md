@@ -41,7 +41,7 @@ reading it first — phases depend on each other.
 
 ## Branch
 
-All development goes on `claude/factory-blueprint-research-zF12s`.
+All development goes on a specific feature branches.
 Do not push elsewhere without explicit permission.
 
 ## v1 scope constraints
