@@ -98,3 +98,22 @@ def test_all_entities_within_canvas(green_circuit_blueprint: str) -> None:
         x, y = e["position"]["x"], e["position"]["y"]
         assert 0 <= x <= canvas + 5, f"entity {e['name']} x={x} outside canvas"
         assert 0 <= y <= canvas + 5, f"entity {e['name']} y={y} outside canvas"
+
+
+def test_contains_steam_power_cluster(green_circuit_blueprint: str) -> None:
+    """Phase 8b emits a sized steam-engine + boiler + offshore-pump cluster."""
+    entities = decode(green_circuit_blueprint)["blueprint"]["entities"]
+    names = [e["name"] for e in entities]
+    assert "steam-engine" in names
+    assert "boiler" in names
+    assert "offshore-pump" in names
+
+
+def test_verify_command_terminates(green_circuit_blueprint: str) -> None:
+    """`fbg verify` on the emitted blueprint runs without crashing and
+    returns a structured exit code (0 or 1)."""
+    result = runner.invoke(app, ["verify", green_circuit_blueprint])
+    # Exit code 0 (no errors) or 1 (some structural errors found) — both
+    # are acceptable; the contract is just that it terminates and produces
+    # a report.
+    assert result.exit_code in (0, 1), f"verify crashed:\n{result.output}"

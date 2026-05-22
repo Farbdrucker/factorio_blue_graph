@@ -19,7 +19,15 @@ from factorio_blue_graph.layout.inserter import InserterResult
 from factorio_blue_graph.layout.placement import Placement
 from factorio_blue_graph.layout.power import PoleResult
 from factorio_blue_graph.layout.routing import RoutingResult
-from factorio_blue_graph.model.blueprint import BeltSegment, Splitter
+from factorio_blue_graph.model.blueprint import (
+    BeltSegment,
+    Boiler,
+    Chest,
+    OffshorePump,
+    PowerSourceResult,
+    Splitter,
+    SteamEngine,
+)
 from factorio_blue_graph.model.graph import BlockGraph
 
 # Factorio 1.1.43 version word (major=1, minor=1, patch=43, build=0).
@@ -35,6 +43,8 @@ def encode(
     inserter_result: InserterResult,
     pole_result: PoleResult,
     label: str = "FBG Blueprint",
+    power_source: PowerSourceResult | None = None,
+    chests: tuple[Chest, ...] = (),
 ) -> str:
     """Encode pipeline outputs as an importable Factorio 1.1 blueprint string."""
     entities: list[dict] = []
@@ -56,6 +66,9 @@ def encode(
     _emit_inserters(entities, inserter_result)
     _emit_boundary_belts(entities, inserter_result, sp_tiles, belt_seen)
     _emit_poles(entities, pole_result)
+    _emit_chests(entities, chests)
+    if power_source is not None:
+        _emit_power_source(entities, power_source)
 
     for i, ent in enumerate(entities, start=1):
         ent["entity_number"] = i
@@ -172,6 +185,71 @@ def _emit_poles(entities: list[dict], pole_result: PoleResult) -> None:
                 "position": {"x": pole.x + 0.5, "y": pole.y + 0.5},
             }
         )
+
+
+def _emit_chests(entities: list[dict], chests: tuple[Chest, ...]) -> None:
+    for chest in chests:
+        entities.append(
+            {
+                "name": chest.name,
+                "position": {"x": chest.x + 0.5, "y": chest.y + 0.5},
+            }
+        )
+
+
+def _emit_power_source(entities: list[dict], ps: PowerSourceResult) -> None:
+    """Emit steam-engine + boiler + offshore-pump entities.
+
+    Positions are entity centers per Factorio conventions:
+      - steam-engine is 3×5 → center is (x+1.5, y+2.5) for north-south, etc.
+      - boiler is 3×2 → center is (x+1.5, y+1.0)
+      - offshore-pump is 1×2 → center is (x+0.5, y+1.0)
+    """
+    for se in ps.steam_engines:
+        cx, cy = _steam_engine_center(se)
+        entities.append(
+            {
+                "name": "steam-engine",
+                "position": {"x": cx, "y": cy},
+                "direction": se.direction,
+            }
+        )
+    for bo in ps.boilers:
+        cx, cy = _boiler_center(bo)
+        entities.append(
+            {
+                "name": "boiler",
+                "position": {"x": cx, "y": cy},
+                "direction": bo.direction,
+            }
+        )
+    for pump in ps.offshore_pumps:
+        cx, cy = _pump_center(pump)
+        entities.append(
+            {
+                "name": "offshore-pump",
+                "position": {"x": cx, "y": cy},
+                "direction": pump.direction,
+            }
+        )
+
+
+def _steam_engine_center(se: SteamEngine) -> tuple[float, float]:
+    if se.direction in (_DIR_E, _DIR_W):
+        return (se.x + 5 / 2, se.y + 3 / 2)
+    return (se.x + 3 / 2, se.y + 5 / 2)
+
+
+def _boiler_center(bo: Boiler) -> tuple[float, float]:
+    if bo.direction in (_DIR_E, _DIR_W):
+        return (bo.x + 3 / 2, bo.y + 2 / 2)
+    return (bo.x + 2 / 2, bo.y + 3 / 2)
+
+
+def _pump_center(pump: OffshorePump) -> tuple[float, float]:
+    if pump.direction in (_DIR_E, _DIR_W):
+        return (pump.x + 1.0, pump.y + 0.5)
+    return (pump.x + 0.5, pump.y + 1.0)
 
 
 # ---------------------------------------------------------------------------
