@@ -1,3 +1,6 @@
+# Default output of `fbg plan` (regenerated on every run)
+blueprint.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

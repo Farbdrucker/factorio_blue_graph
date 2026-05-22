@@ -188,13 +188,23 @@ def _emit_poles(entities: list[dict], pole_result: PoleResult) -> None:
 
 
 def _emit_chests(entities: list[dict], chests: tuple[Chest, ...]) -> None:
+    """Emit each chest with a request-filter slot showing the item it should
+    hold. Vanilla wooden-chests don't support request-filters at runtime,
+    but blueprints accept the `request_filters` array and display the item
+    icon on the chest preview — a clear hint to the player about what to
+    drop in.
+    """
     for chest in chests:
-        entities.append(
-            {
-                "name": chest.name,
-                "position": {"x": chest.x + 0.5, "y": chest.y + 0.5},
-            }
-        )
+        ent: dict = {
+            "name": chest.name,
+            "position": {"x": chest.x + 0.5, "y": chest.y + 0.5},
+        }
+        if chest.item_id:
+            # `request_filters` slot is honored by logistic chests; for a
+            # wooden chest the icon still renders in the preview, marking
+            # what should go inside.
+            ent["request_filters"] = [{"index": 1, "name": chest.item_id, "count": 0}]
+        entities.append(ent)
 
 
 def _emit_power_source(entities: list[dict], ps: PowerSourceResult) -> None:

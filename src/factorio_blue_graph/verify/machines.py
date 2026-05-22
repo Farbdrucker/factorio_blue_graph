@@ -64,8 +64,14 @@ def check(
             need_inputs = {
                 ing.item_id for ing in recipe.ingredients if ing.item_id not in FLUID_INPUTS
             }
-            has_inputs = inputs_seen.get(mid, set())
-            for missing in need_inputs - has_inputs:
+            # If any inserter drops onto this machine, treat all non-fluid
+            # ingredients as satisfied — we can't tell from the IR alone
+            # which item an inserter carries, so requiring at least one
+            # input inserter per machine is the strictest deduction that
+            # doesn't produce false MISSING_INSERTER for chest-fed factories.
+            has_any_input_inserter = mid in inputs_seen and len(inputs_seen[mid]) > 0
+            missing_inputs = set() if has_any_input_inserter else need_inputs
+            for missing in missing_inputs:
                 report.issues.append(
                     Issue(
                         code="MISSING_INSERTER",
@@ -118,17 +124,14 @@ def _index_inserters_by_machine(
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Build (inputs_seen, outputs_seen) keyed by machine_id.
 
-    `inputs_seen[mid]` is the set of item-bearing tiles that drop onto
-    `mid`; `outputs_seen[mid]` mirrors for pickup. We can't tell what
-    item an inserter carries from the IR alone, so we only key presence
-    — the check at the call-site treats "any input inserter at all"
-    optimistically against every ingredient. This is conservative for
-    catching wholly-missing-inserter cases (the symptom in the user's
-    screenshot) and intentionally lenient about cross-ingredient
-    routing (a separate downstream check could enforce per-item lanes).
+    Each maps `machine_id` → set of inserter tile coords. We can't tell
+    from the IR alone which item an inserter carries, so the caller
+    treats "any input inserter at all" as satisfying every non-fluid
+    ingredient (and likewise for outputs). The set's size doubles as a
+    cheap presence indicator.
     """
-    inputs: dict[str, set[str]] = {}
-    outputs: dict[str, set[str]] = {}
+    inputs: dict[str, set[tuple[int, int]]] = {}
+    outputs: dict[str, set[tuple[int, int]]] = {}
     for tile, cell in grid.inserters():
         ix, iy = tile
         drop = cell.direction
@@ -139,22 +142,10 @@ def _index_inserters_by_machine(
         drop_ent = grid.get(*drop_tile)
         pickup_ent = grid.get(*pickup_tile)
         if isinstance(drop_ent, MachineCell):
-            inputs.setdefault(drop_ent.machine_id, set()).add("*")
+            inputs.setdefault(drop_ent.machine_id, set()).add((ix, iy))
         if isinstance(pickup_ent, MachineCell):
-            outputs.setdefault(pickup_ent.machine_id, set()).add("*")
-
-    # Hack: callers compare set-membership against ingredient ids; a
-    # singleton "*" matches every ingredient via a small wrapper. Wrap
-    # each set as a wildcard-aware container.
-    return _wildcardify(inputs), _wildcardify(outputs)
-
-
-def _wildcardify(d: dict[str, set[str]]) -> dict[str, set[str]]:
-    class _Wild(set):
-        def __contains__(self, _item):  # type: ignore[override]
-            return True
-
-    return {k: (_Wild() if "*" in v else v) for k, v in d.items()}
+            outputs.setdefault(pickup_ent.machine_id, set()).add((ix, iy))
+    return inputs, outputs
 
 
 __all__ = ["check"]
