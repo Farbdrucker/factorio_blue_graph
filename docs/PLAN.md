@@ -235,6 +235,14 @@ Dependencies (managed by `uv add`):
 - [x] CI workflow `.github/workflows/ci.yml`: `uv sync`, `uv run ruff check`, `uv run ruff format --check`, `uv run pytest`
 - [x] README with installation (`uv tool install .`), quickstart, and a generated example blueprint
 
+### Phase 12 — Structural verifier + repair loop
+
+- [x] `factorio_blue_graph.verify` package with 10 structural checks (belt continuity, underground pairs, belt-direction conflicts, inserter orientation, orphan inserters, missing inserters, starved raw inputs, pole coverage, pole-network connectivity, missing power source)
+- [x] `factorio_blue_graph.repair.plan_with_repair` loop with priority-ordered passes (orphan-inserter drop → flip → starved-input chest → missing-inserter add → unpowered-pole add → steam-engine cluster emit), oscillation guard, budget=8
+- [x] `factorio_blue_graph.layout.power_source.emit_power_source` sizes a steam-engine + boiler + offshore-pump cluster from total machine + inserter draw and places it on a free canvas-edge strip
+- [x] Inline integration in `fbg plan` (phase 8b cluster emission + phase 8.5 repair) plus standalone `fbg verify <bp>` CLI command (exit 0 on pass, 1 on errors, 2 on decode failure; `--json` available)
+- [x] Tests: 27 new unit tests under `tests/verify/` and `tests/repair/`; e2e tests assert steam cluster is emitted and that `fbg verify` runs on the generated blueprint
+
 ---
 
 ## Verification recipe for any agent

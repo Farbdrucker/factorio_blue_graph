@@ -13,11 +13,14 @@ from factorio_blue_graph.layout.clustering import cluster_into_blocks
 from factorio_blue_graph.layout.inserter import place_inserters
 from factorio_blue_graph.layout.placement import PlacementError, place_blocks
 from factorio_blue_graph.layout.power import cover_with_poles
+from factorio_blue_graph.layout.power_source import emit_power_source
 from factorio_blue_graph.layout.routing import RoutingError, route_belts
 from factorio_blue_graph.model.graph import FlowGraph, RecipeHypergraph
 from factorio_blue_graph.optimize.pareto import pareto_sweep
 from factorio_blue_graph.planning.demand import DemandError, expand_demand
 from factorio_blue_graph.planning.lp import MachinePlanError, solve_machine_counts
+from factorio_blue_graph.repair import PlanState, plan_with_repair
+from factorio_blue_graph.verify import verify_blueprint_string
 from factorio_blue_graph.viz.progress import PipelineProgress
 
 app = typer.Typer(help="Factorio Blue Graph — plan and optimize blueprints.")
@@ -179,15 +182,56 @@ def plan(
         uncov = f", {len(power.uncovered_machines)} uncovered" if power.uncovered_machines else ""
         prog.log(f"  Phase 8: {len(power.poles)} power poles{uncov}")
 
+        # Phase 8b: emit a steam-engine + boiler + offshore-pump cluster.
+        power_source = emit_power_source(placement, block_graph, routing, inserters)
+        if power_source.steam_engines:
+            prog.log(
+                f"  Phase 8b: power cluster "
+                f"{len(power_source.offshore_pumps)} pump / "
+                f"{len(power_source.boilers)} boilers / "
+                f"{len(power_source.steam_engines)} engines "
+                f"({power_source.nominal_kw:.0f} kW for {power_source.required_kw:.0f} kW load)"
+            )
+        else:
+            prog.log(
+                f"  Phase 8b: power cluster unplaced ({power_source.status}, "
+                f"required {power_source.required_kw:.0f} kW)"
+            )
+
+        # Phase 8.5: verifier + repair loop.
+        state = PlanState(
+            placement=placement,
+            block_graph=block_graph,
+            flow_graph=flow_graph,
+            routing=routing,
+            inserters=inserters,
+            power=power,
+            power_source=power_source,
+        )
+        outcome = plan_with_repair(state)
+        e, w, _ = outcome.report.counts()
+        prog.log(
+            f"  Phase 8.5: verifier — {outcome.iterations} repair iterations, "
+            f"{e} error / {w} warning remaining"
+        )
+        if not outcome.report.ok:
+            console.print()
+            outcome.report.render(console)
+            console.print(
+                "[yellow]warning:[/] verifier still reports errors; exporting blueprint anyway."
+            )
+
         # Phase 9: blueprint export
         with prog.phase(9):
             bp_string = encode(
-                placement,
-                block_graph,
-                routing,
-                inserters,
-                power,
+                outcome.state.placement,
+                outcome.state.block_graph,
+                outcome.state.routing,
+                outcome.state.inserters,
+                outcome.state.power,
                 label=f"FBG {item} {rate:.0f}/min",
+                power_source=outcome.state.power_source,
+                chests=tuple(outcome.state.chests),
             )
         prog.log(f"  Phase 9: blueprint string length {len(bp_string)} chars")
 
@@ -327,6 +371,35 @@ def recipes(
     for it in sorted(matches, key=lambda x: x.id):
         table.add_row(it.id, it.name, it.type, "raw" if it.recipe.is_raw else "")
     console.print(table)
+
+
+@app.command()
+def verify(
+    bp: str = typer.Argument(..., help="Blueprint string, or path to a file containing one."),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON report on stdout."),
+) -> None:
+    """Run structural checks on any blueprint string."""
+    blueprint_text = bp
+    candidate = Path(bp)
+    if candidate.exists() and candidate.is_file():
+        blueprint_text = candidate.read_text().strip()
+    try:
+        report = verify_blueprint_string(blueprint_text)
+    except ValueError as exc:
+        console.print(f"[red]decode failed:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]decode failed:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if json_out:
+        import json
+
+        console.print_json(json.dumps(report.to_dict()))
+    else:
+        report.render(console)
+
+    raise typer.Exit(code=0 if report.ok else 1)
 
 
 if __name__ == "__main__":
