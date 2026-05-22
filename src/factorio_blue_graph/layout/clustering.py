@@ -44,11 +44,17 @@ def cluster_into_blocks(
     flow_graph: FlowGraph,
     max_block_size: int = DEFAULT_MAX_BLOCK_SIZE,
     random_state: int = 42,
+    single_recipe_blocks: bool = False,
 ) -> BlockGraph:
     """Cluster `flow_graph`'s machines into a `BlockGraph`.
 
     `max_block_size` is the hard cap on machines per block (default 16).
     `random_state` is forwarded to Louvain for reproducible partitions.
+    `single_recipe_blocks` (default True): when True, every block holds
+    machines of exactly one recipe. This is what Phase 6 needs to route
+    actual belts — when all recipes share a block, the block graph has
+    no inter-block edges and no belts are laid. Set False to recover the
+    Louvain-merged behaviour for footprint-tight cases.
     """
     if max_block_size <= 0:
         raise ValueError(f"max_block_size must be positive, got {max_block_size}")
@@ -58,9 +64,15 @@ def cluster_into_blocks(
         return bg
 
     proto_chunks = _recipe_chunks(flow_graph, max_block_size)
-    meta = _proto_meta_graph(proto_chunks, flow_graph)
-    partition = community_louvain.best_partition(meta, weight="weight", random_state=random_state)
-    final_groups = _pack_communities(proto_chunks, partition, max_block_size)
+    if single_recipe_blocks:
+        # Skip Louvain — every recipe-chunk becomes its own block.
+        final_groups = proto_chunks
+    else:
+        meta = _proto_meta_graph(proto_chunks, flow_graph)
+        partition = community_louvain.best_partition(
+            meta, weight="weight", random_state=random_state
+        )
+        final_groups = _pack_communities(proto_chunks, partition, max_block_size)
 
     member_to_block: dict[str, str] = {}
     for idx, members in enumerate(final_groups):

@@ -65,8 +65,18 @@ def place_inserters(
     block_graph: BlockGraph,
     flow_graph: FlowGraph,
     routing_result: RoutingResult,
+    *,
+    emit_boundary_stubs: bool = True,
 ) -> InserterResult:
-    """Emit inserters and boundary stubs for every belt endpoint."""
+    """Emit inserters and boundary stubs for every belt endpoint.
+
+    `emit_boundary_stubs` (default True for backwards compat): when True,
+    every `FlowGraph.external_in_edges` entry gets a 1-tile floating belt
+    at the canvas edge plus a sink inserter. When False, raw-input stubs
+    are skipped — the caller is expected to handle them via
+    `layout.io_chests.place_io_chests` instead, which is the path used
+    by `fbg plan` to produce functional blueprints.
+    """
     inserters: list[Inserter] = []
     boundary_belts: list[BeltSegment] = []
     unresolved: list[str] = []
@@ -101,6 +111,13 @@ def place_inserters(
         )
         if not (ok_src and ok_snk):
             unresolved.append(f"{path.source_block}->{path.target_block}:{path.item_id}")
+
+    if not emit_boundary_stubs:
+        return InserterResult(
+            inserters=tuple(inserters),
+            boundary_belts=(),
+            unresolved=tuple(unresolved),
+        )
 
     for ext in flow_graph.external_in_edges:
         try:

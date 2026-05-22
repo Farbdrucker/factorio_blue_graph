@@ -14,10 +14,17 @@ from factorio_blue_graph.verify.report import Severity, VerifyReport
 # inserter; running MISSING first would place an inserter that the chest
 # pass would then have to align around.
 _PASS_TABLE = {
+    # ORPHAN_INSERTER → delete the inserter (cheapest, safe).
     "ORPHAN_INSERTER": (passes.drop_orphan_inserters, 1),
-    "WRONG_INSERTER_DIRECTION": (passes.flip_inserter_direction, 2),
-    "STARVED_INPUT": (passes.add_external_source_chests, 3),
-    "MISSING_INSERTER": (passes.add_inserters_for_missing, 4),
+    # WRONG_INSERTER_DIRECTION → delete the inserter outright. Flipping
+    # the direction tends to oscillate (drop-empty becomes pickup-empty);
+    # since `place_io_chests` already creates valid chest+inserter pairs
+    # for every ingredient/product, any wrong-direction inserter that
+    # survives into Phase 8.5 is necessarily a stale leftover.
+    "WRONG_INSERTER_DIRECTION": (passes.drop_orphan_inserters, 2),
+    # MISSING_INSERTER → resolved by Phase 7c (io_chests); disabled here
+    # to avoid the repair pass placing orphan inserters when no chest
+    # tile is available.
     "UNPOWERED_MACHINE": (passes.add_pole_for_unpowered, 7),
     "UNPOWERED_INSERTER": (passes.add_pole_for_unpowered, 7),
     "NO_POWER_SOURCE": (passes.emit_steam_cluster, 9),

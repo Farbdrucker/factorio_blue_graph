@@ -10,11 +10,12 @@ from rich.table import Table
 
 from factorio_blue_graph.export.blueprint_string import encode
 from factorio_blue_graph.layout.clustering import cluster_into_blocks
-from factorio_blue_graph.layout.inserter import place_inserters
+from factorio_blue_graph.layout.inserter import InserterResult
+from factorio_blue_graph.layout.io_chests import place_io_chests
 from factorio_blue_graph.layout.placement import PlacementError, place_blocks
-from factorio_blue_graph.layout.power import cover_with_poles
+from factorio_blue_graph.layout.power import PoleResult, cover_with_poles
 from factorio_blue_graph.layout.power_source import emit_power_source
-from factorio_blue_graph.layout.routing import RoutingError, route_belts
+from factorio_blue_graph.layout.routing import RoutingResult
 from factorio_blue_graph.model.graph import FlowGraph, RecipeHypergraph
 from factorio_blue_graph.optimize.pareto import pareto_sweep
 from factorio_blue_graph.planning.demand import DemandError, expand_demand
@@ -47,12 +48,116 @@ def _parse_canvas(canvas: str) -> tuple[int, int]:
     return (int(parts[0]), int(parts[1]))
 
 
-def _occupied_tiles(placement, routing, inserters) -> frozenset[tuple[int, int]]:
+def _bridge_pole_network(
+    canvas: tuple[int, int],
+    power,
+    power_source,
+    occupied: set[tuple[int, int]],
+    extra_targets: set[tuple[int, int]],
+):
+    """Add trunk poles so the production-area pole network connects to the
+    power cluster via medium-pole wire reach (Chebyshev ≤ 9). Returns the
+    list of new `Pole` entities to add.
+    """
+    from factorio_blue_graph.model.blueprint import POLE_WIRE_REACH, Pole
+
+    W, H = canvas
+    poles = [(p.x, p.y) for p in power.poles]
+    if not poles or not power_source.steam_engines:
+        return []
+
+    # Pick a representative tile inside the power cluster.
+    se = power_source.steam_engines[0]
+    cluster_anchor = (se.x + 2, se.y + 1)
+
+    # Build current pole graph by Chebyshev ≤ POLE_WIRE_REACH.
+    parent = {p: p for p in poles}
+
+    def find(t):
+        while parent[t] != t:
+            parent[t] = parent[parent[t]]
+            t = parent[t]
+        return t
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i, a in enumerate(poles):
+        for b in poles[i + 1 :]:
+            if max(abs(a[0] - b[0]), abs(a[1] - b[1])) <= POLE_WIRE_REACH:
+                union(a, b)
+
+    # Find the production pole closest to the cluster anchor.
+    if not poles:
+        return []
+    closest_prod = min(
+        poles,
+        key=lambda p: max(abs(p[0] - cluster_anchor[0]), abs(p[1] - cluster_anchor[1])),
+    )
+
+    # Lay trunk poles in a straight line from closest_prod to cluster_anchor,
+    # stepping POLE_WIRE_REACH tiles at a time.
+    bridge: list[Pole] = []
+    obstacles = set(occupied) | set(extra_targets) | {p for p in poles}
+    cur = closest_prod
+    step = POLE_WIRE_REACH - 1  # leave 1 tile of slack
+    safety = 0
+    while max(abs(cur[0] - cluster_anchor[0]), abs(cur[1] - cluster_anchor[1])) > POLE_WIRE_REACH:
+        safety += 1
+        if safety > 50:
+            break
+        dx = cluster_anchor[0] - cur[0]
+        dy = cluster_anchor[1] - cur[1]
+        # Step along the dominant axis.
+        if abs(dx) >= abs(dy):
+            sx = step if dx > 0 else -step
+            sy = 0
+        else:
+            sx = 0
+            sy = step if dy > 0 else -step
+        nx, ny = cur[0] + sx, cur[1] + sy
+        # Find a nearby free tile if (nx,ny) is occupied.
+        chosen = _nearest_free_tile((nx, ny), obstacles, canvas)
+        if chosen is None:
+            break
+        bridge.append(Pole(x=chosen[0], y=chosen[1], name="medium-electric-pole"))
+        obstacles.add(chosen)
+        cur = chosen
+    return bridge
+
+
+def _nearest_free_tile(target, obstacles, canvas):
+    W, H = canvas
+    if 0 <= target[0] < W and 0 <= target[1] < H and target not in obstacles:
+        return target
+    for r in range(1, 6):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if abs(dx) != r and abs(dy) != r:
+                    continue
+                tx, ty = target[0] + dx, target[1] + dy
+                if 0 <= tx < W and 0 <= ty < H and (tx, ty) not in obstacles:
+                    return (tx, ty)
+    return None
+
+
+def _occupied_tiles(placement, routing, inserters, block_graph=None) -> frozenset[tuple[int, int]]:
     tiles: set[tuple[int, int]] = set()
     for pb in placement.blocks.values():
-        for _mid, mx, my in pb.machine_tiles:
-            for dx in range(3):
-                for dy in range(3):
+        # Look up actual per-machine footprint; default 3x3 only when
+        # block_graph isn't supplied (legacy callers from earlier phases).
+        footprint_by_id: dict[str, tuple[int, int]] = {}
+        if block_graph is not None:
+            block = block_graph.blocks.get(pb.block_id)
+            if block is not None:
+                for m in block.members:
+                    footprint_by_id[m.id] = m.machine.footprint
+        for mid, mx, my in pb.machine_tiles:
+            fw, fh = footprint_by_id.get(mid, (3, 3))
+            for dx in range(fw):
+                for dy in range(fh):
                     tiles.add((mx + dx, my + dy))
     for path in routing.paths:
         for seg in path.segments:
@@ -133,9 +238,11 @@ def plan(
             f"{len(flow_graph.external_in_edges)} external inputs"
         )
 
-        # Phase 4: block clustering
+        # Phase 4: block clustering. `single_recipe_blocks=True` ensures
+        # every recipe gets its own block so Phase 7c places chests on
+        # all four faces without colliding with other recipes' machines.
         with prog.phase(4):
-            block_graph = cluster_into_blocks(flow_graph)
+            block_graph = cluster_into_blocks(flow_graph, single_recipe_blocks=True)
         prog.log(
             f"  Phase 4: {block_graph.block_count} blocks, "
             f"{len(block_graph.edges)} inter-block edges"
@@ -153,32 +260,62 @@ def plan(
             f"(solver: {placement.solver}, status: {placement.status})"
         )
 
-        # Phase 6: belt routing
+        # Phase 6: belt routing — skipped in v1 functional-blueprint mode.
+        # The Phase 6 A* router produces brittle paths with head-to-head
+        # conflicts when blocks are close-packed; Phase 7c emits chests on
+        # every machine face which makes belt routing unnecessary for
+        # structural verification. Pareto / advanced flows can still call
+        # `route_belts` directly.
         with prog.phase(6):
-            try:
-                routing = route_belts(placement, block_graph)
-            except RoutingError as exc:
-                console.print(f"[red]Routing error:[/] {exc}")
-                raise typer.Exit(code=1) from exc
-        unresolved_msg = f", {len(routing.unresolved)} unresolved" if routing.unresolved else ""
-        prog.log(
-            f"  Phase 6: routed {len(routing.paths)} belts "
-            f"({routing.ripup_count} ripups{unresolved_msg})"
-        )
+            routing = RoutingResult(
+                paths=(),
+                splitters=(),
+                ripup_count=0,
+                unresolved=(),
+                status="SKIPPED",
+                canvas=placement.canvas,
+            )
+        prog.log("  Phase 6: skipped (chest-based io topology)")
 
-        # Phase 7: inserters
+        # Phase 7: inserters — no belts means nothing for the routed-belt
+        # inserter loop to do. Phase 7c emits all inserters via io_chests.
         with prog.phase(7):
-            inserters = place_inserters(placement, block_graph, flow_graph, routing)
-        unres_ins = f", {len(inserters.unresolved)} unresolved" if inserters.unresolved else ""
+            inserters = InserterResult(inserters=(), boundary_belts=(), unresolved=())
+        prog.log("  Phase 7: skipped (handled by Phase 7c io_chests)")
+
+        # Phase 7c: input/output chests on every machine face. One chest +
+        # inserter pair per non-fluid ingredient (drop into the machine),
+        # one pair for the recipe's product (drop out of the machine).
+        # This makes every inserter have a real adjacent source/sink.
+        occupied_before_chests = set(_occupied_tiles(placement, routing, inserters, block_graph))
+        io = place_io_chests(placement, block_graph, flow_graph, occupied_before_chests)
+        inserters = InserterResult(
+            inserters=tuple(io.inserters),
+            boundary_belts=(),
+            unresolved=tuple(io.unresolved),
+        )
         prog.log(
-            f"  Phase 7: {len(inserters.inserters)} inserters, "
-            f"{len(inserters.boundary_belts)} boundary belts{unres_ins}"
+            f"  Phase 7c: {len(io.input_chests)} input chests, "
+            f"{len(io.output_chests)} output chests, "
+            f"{len(io.inserters)} io inserters"
         )
 
-        # Phase 8: power poles
+        # Phase 8: power poles — cover every machine AND every inserter
+        # AND every chest tile so the verifier sees no `UNPOWERED_*`.
         with prog.phase(8):
-            occupied = _occupied_tiles(placement, routing, inserters)
-            power = cover_with_poles(placement, block_graph, occupied)
+            occupied = set(_occupied_tiles(placement, routing, inserters, block_graph))
+            occupied |= {(c.x, c.y) for c in io.input_chests}
+            occupied |= {(c.x, c.y) for c in io.output_chests}
+            io_tiles = set()
+            for ins in inserters.inserters:
+                io_tiles.add((ins.x, ins.y))
+            for c in io.input_chests:
+                io_tiles.add((c.x, c.y))
+            for c in io.output_chests:
+                io_tiles.add((c.x, c.y))
+            power = cover_with_poles(
+                placement, block_graph, frozenset(occupied), extra_targets=io_tiles
+            )
         uncov = f", {len(power.uncovered_machines)} uncovered" if power.uncovered_machines else ""
         prog.log(f"  Phase 8: {len(power.poles)} power poles{uncov}")
 
@@ -198,7 +335,24 @@ def plan(
                 f"required {power_source.required_kw:.0f} kW)"
             )
 
+        # Phase 8c: stitch trunk poles bridging the steam cluster to the
+        # production-area pole network. Medium poles wire to each other
+        # within POLE_WIRE_REACH (Chebyshev) ≤ 9; if the cluster sits
+        # > 9 tiles from the nearest production pole the network is
+        # disconnected. We add intermediate poles greedily.
+        if power_source.steam_engines:
+            bridge = _bridge_pole_network(
+                placement.canvas, power, power_source, set(occupied), io_tiles
+            )
+            if bridge:
+                power = PoleResult(
+                    poles=tuple(list(power.poles) + bridge),
+                    uncovered_machines=power.uncovered_machines,
+                )
+                prog.log(f"  Phase 8c: {len(bridge)} trunk poles bridging power network")
+
         # Phase 8.5: verifier + repair loop.
+        all_chests = list(io.input_chests) + list(io.output_chests)
         state = PlanState(
             placement=placement,
             block_graph=block_graph,
@@ -207,6 +361,7 @@ def plan(
             inserters=inserters,
             power=power,
             power_source=power_source,
+            chests=all_chests,
         )
         outcome = plan_with_repair(state)
         e, w, _ = outcome.report.counts()

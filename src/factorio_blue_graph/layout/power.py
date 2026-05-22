@@ -46,29 +46,35 @@ def cover_with_poles(
     placement: Placement,
     block_graph: BlockGraph,
     occupied_tiles: frozenset[tuple[int, int]],
+    extra_targets: set[tuple[int, int]] | None = None,
 ) -> PoleResult:
-    """Greedy minimum cover of every placed machine by medium poles.
+    """Greedy minimum cover by medium poles.
 
-    `occupied_tiles` should include every belt segment, underground belt,
-    splitter tile (both halves), inserter tile, and machine footprint
-    tile. Pole candidates are drawn from canvas tiles not in this set.
+    Every placed machine and every tile in `extra_targets` (typically
+    inserter and chest tiles) must lie inside some pole's 7×7 supply area.
+    `occupied_tiles` is the set of tiles unavailable for a pole.
     """
     machines = _collect_machines(placement, block_graph)
-    if not machines:
+    extra_targets = extra_targets or set()
+    if not machines and not extra_targets:
         return PoleResult(poles=(), uncovered_machines=())
 
     W, H = placement.canvas
-    # Candidate poles: every canvas tile not occupied, considered in
-    # lexicographic order so ties resolve deterministically.
+    # Candidate poles: every canvas tile not occupied.
     candidates = [(x, y) for y in range(H) for x in range(W) if (x, y) not in occupied_tiles]
-    # Precompute the machine set each candidate would cover so the greedy
-    # loop is O(iterations · |candidates|) instead of O(|candidates| ·
-    # |machines|) per iteration.
+    # Each candidate covers a set of "target ids". Machine ids are strings;
+    # extra targets are encoded as `tile:x,y` strings so all targets live
+    # in the same id-space for the greedy loop.
     covers: dict[tuple[int, int], set[str]] = {}
     for tile in candidates:
-        covers[tile] = _machines_in_coverage(tile, machines)
+        cov = _machines_in_coverage(tile, machines)
+        for ex in extra_targets:
+            if _tile_in_coverage(tile, ex):
+                cov.add(f"tile:{ex[0]},{ex[1]}")
+        covers[tile] = cov
 
-    remaining = {mid for mid, *_ in machines}
+    remaining: set[str] = {mid for mid, *_ in machines}
+    remaining |= {f"tile:{x},{y}" for (x, y) in extra_targets}
     poles: list[Pole] = []
     while remaining:
         best: tuple[int, int] | None = None
@@ -83,10 +89,19 @@ def cover_with_poles(
         poles.append(Pole(x=best[0], y=best[1], name="medium-electric-pole"))
         remaining -= covers[best]
 
+    # `uncovered_machines` only tracks machine ids — extra targets are
+    # informational and not surfaced here.
+    uncov_machine_ids = {mid for mid, *_ in machines if mid in remaining}
     return PoleResult(
         poles=tuple(poles),
-        uncovered_machines=tuple(sorted(remaining)),
+        uncovered_machines=tuple(sorted(uncov_machine_ids)),
     )
+
+
+def _tile_in_coverage(pole_tile: tuple[int, int], target: tuple[int, int]) -> bool:
+    px, py = pole_tile
+    tx, ty = target
+    return abs(tx - px) <= POLE_RADIUS and abs(ty - py) <= POLE_RADIUS
 
 
 def _collect_machines(
