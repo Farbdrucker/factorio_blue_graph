@@ -243,6 +243,15 @@ Dependencies (managed by `uv add`):
 - [x] Inline integration in `fbg plan` (phase 8b cluster emission + phase 8.5 repair) plus standalone `fbg verify <bp>` CLI command (exit 0 on pass, 1 on errors, 2 on decode failure; `--json` available)
 - [x] Tests: 27 new unit tests under `tests/verify/` and `tests/repair/`; e2e tests assert steam cluster is emitted and that `fbg verify` runs on the generated blueprint
 
+### Phase 13 — Tick simulation + throughput-repair loop
+
+- [x] `factorio_blue_graph.simulate` package: discrete-tick simulator with `MachineRuntime` (craft-progress + slots), `InserterRuntime` (swing state machine), `ChestRuntime` (finite + infinite-source), `BeltPathRuntime` (token-bucket per path).
+- [x] `SimReport` mirroring `VerifyReport` (codes_multiset, by_code, render, to_dict) with `Bottleneck` codes `OUTPUT_UNDERDELIVERY`, `DISCONNECTED_FLOW`, `MACHINE_STARVED`, `BELT_SATURATED`, `INSERTER_BOTTLENECK`.
+- [x] `factorio_blue_graph.repair.throughput_loop.plan_with_throughput_repair` mirroring `plan_with_repair` (priority table, oscillation guard, best-state tracking, budget=4) with `enable_belt_routing` heal pass that promotes Phase 6 routing on `DISCONNECTED_FLOW`.
+- [x] CLI integration: Phase 8.6 block in `fbg plan`, `--no-simulate` escape hatch, `--sim-threshold`, `--sim-ticks`. Exit code 2 with rendered `SimReport` and **no blueprint written** when the heal budget is exhausted.
+- [x] Tests: 24 new tests under `tests/simulate/` covering runtime entities, report semantics, integration with `PlanState`, throughput-loop convergence and budget exhaustion. New CLI tests assert exit-code 2 on under-delivery and exit-code 0 with warning under `--no-simulate`.
+- [ ] Heavier heal passes (`bump_belt_tier`, `respace_and_replace`) — initial stubs return 0; finishing these requires teaching `place_blocks` about explicit spacing options.
+
 ---
 
 ## Verification recipe for any agent
@@ -254,11 +263,14 @@ uv sync
 uv run ruff format
 uv run ruff check --fix
 uv run pytest -q
-uv run fbg plan green-circuit --rate 60 --canvas 60x60 --output /tmp/bp.txt
+uv run fbg plan green-circuit --rate 60 --canvas 60x60 --output /tmp/bp.txt --no-simulate
 ```
 
 The final command must terminate within 60s and produce a non-empty
-blueprint string in `/tmp/bp.txt`.
+blueprint string in `/tmp/bp.txt`. `--no-simulate` skips Phase 8.6
+throughput verification, which currently rejects the chest-only topology
+emitted by Phase 7c. Drop the flag once Phase 13's heavier heal passes
+are wired in.
 
 ---
 

@@ -21,6 +21,8 @@ from factorio_blue_graph.optimize.pareto import pareto_sweep
 from factorio_blue_graph.planning.demand import DemandError, expand_demand
 from factorio_blue_graph.planning.lp import MachinePlanError, solve_machine_counts
 from factorio_blue_graph.repair import PlanState, plan_with_repair
+from factorio_blue_graph.repair.throughput_loop import plan_with_throughput_repair
+from factorio_blue_graph.simulate import ACHIEVEMENT_THRESHOLD
 from factorio_blue_graph.verify import verify_blueprint_string
 from factorio_blue_graph.viz.progress import PipelineProgress
 
@@ -187,6 +189,19 @@ def plan(
     rate: float = typer.Option(..., "--rate", help="Items per minute."),
     canvas: str = typer.Option("60x60", "--canvas", help="Canvas size WxH in tiles."),
     output: str = typer.Option("blueprint.txt", "--output", help="Output file path."),
+    no_simulate: bool = typer.Option(
+        False, "--no-simulate", help="Skip Phase 8.6 throughput simulation."
+    ),
+    sim_threshold: float = typer.Option(
+        ACHIEVEMENT_THRESHOLD,
+        "--sim-threshold",
+        help="Min achieved/target ratio to accept a plan.",
+    ),
+    sim_ticks: str = typer.Option(
+        "1800,3600",
+        "--sim-ticks",
+        help="Sim warmup,measure ticks (60 ticks = 1 sec).",
+    ),
 ) -> None:
     """Plan a blueprint for ITEM at the given throughput rate."""
     try:
@@ -376,17 +391,59 @@ def plan(
                 "[yellow]warning:[/] verifier still reports errors; exporting blueprint anyway."
             )
 
+        # Phase 8.6: throughput simulation + heal loop.
+        final_state = outcome.state
+        if not no_simulate:
+            try:
+                warmup_str, measure_str = sim_ticks.split(",")
+                warmup_ticks_n = int(warmup_str)
+                measure_ticks_n = int(measure_str)
+            except (ValueError, TypeError):
+                console.print(
+                    f"[red]invalid --sim-ticks:[/] {sim_ticks!r} — expected WARMUP,MEASURE"
+                )
+                raise typer.Exit(code=1) from None
+            with prog.phase(10):
+                tp = plan_with_throughput_repair(
+                    outcome.state,
+                    target_item=item,
+                    target_rate_per_sec=rate_per_sec,
+                    threshold=sim_threshold,
+                    warmup_ticks=warmup_ticks_n,
+                    measure_ticks=measure_ticks_n,
+                    recipe_graph=graph,
+                )
+            prog.log(
+                f"  Phase 8.6: simulator — {tp.iterations} heal iterations, "
+                f"{tp.sim_report.achieved_rate_per_sec * 60:.1f}/min achieved "
+                f"({tp.sim_report.achievement_ratio * 100:.0f}% of target)"
+            )
+            if not tp.converged:
+                console.print()
+                tp.sim_report.render(console)
+                console.print(
+                    "[red]error:[/] throughput target not met after heal budget. "
+                    "No blueprint written. Re-run with --no-simulate to emit anyway, "
+                    "or increase --canvas."
+                )
+                raise typer.Exit(code=2)
+            final_state = tp.state
+        else:
+            console.print(
+                "[yellow]warning:[/] --no-simulate set; blueprint may not deliver requested rate."
+            )
+
         # Phase 9: blueprint export
         with prog.phase(9):
             bp_string = encode(
-                outcome.state.placement,
-                outcome.state.block_graph,
-                outcome.state.routing,
-                outcome.state.inserters,
-                outcome.state.power,
+                final_state.placement,
+                final_state.block_graph,
+                final_state.routing,
+                final_state.inserters,
+                final_state.power,
                 label=f"FBG {item} {rate:.0f}/min",
-                power_source=outcome.state.power_source,
-                chests=tuple(outcome.state.chests),
+                power_source=final_state.power_source,
+                chests=tuple(final_state.chests),
             )
         prog.log(f"  Phase 9: blueprint string length {len(bp_string)} chars")
 
