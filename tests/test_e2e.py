@@ -22,9 +22,22 @@ runner = CliRunner()
 @pytest.fixture(scope="module")
 def green_circuit_blueprint(tmp_path_factory: pytest.TempPathFactory) -> str:
     out = tmp_path_factory.mktemp("e2e") / "bp.txt"
+    # --no-simulate: this fixture serves structural e2e assertions
+    # (entities, decode round-trip, no overlaps). Throughput is exercised
+    # by tests/simulate.
     result = runner.invoke(
         app,
-        ["plan", "green-circuit", "--rate", "60", "--canvas", "60x60", "--output", str(out)],
+        [
+            "plan",
+            "green-circuit",
+            "--rate",
+            "60",
+            "--canvas",
+            "60x60",
+            "--output",
+            str(out),
+            "--no-simulate",
+        ],
     )
     assert result.exit_code == 0, f"CLI failed:\n{result.output}"
     assert out.exists(), "output file not written"

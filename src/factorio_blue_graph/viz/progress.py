@@ -36,6 +36,7 @@ _PHASES: dict[int, str] = {
     7: "Inserters",
     8: "Power poles",
     9: "Blueprint export",
+    10: "Throughput simulation",
 }
 _N_PHASES = len(_PHASES)
 
