@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 from ortools.sat.python import cp_model
 
-from factorio_blue_graph.layout.clustering import BLOCK_MARGIN
+from factorio_blue_graph.layout.clustering import BLOCK_MARGIN, INTRA_BLOCK_GAP
 from factorio_blue_graph.model.graph import Block, BlockGraph
 
 _SCALE = 1000  # integer scale for floating-point weights / rates
@@ -75,6 +75,7 @@ def place_blocks(
     time_limit_s: float = 30.0,
     sa_threshold: int = 30,
     random_state: int = 42,
+    min_gap: int = 0,
 ) -> Placement:
     """Lay `block_graph`'s blocks on an `(W, H)` canvas.
 
@@ -128,6 +129,7 @@ def place_blocks(
             gamma,
             time_limit_s,
             random_state,
+            min_gap,
         )
     return _place_anneal(
         blocks,
@@ -139,6 +141,7 @@ def place_blocks(
         beta,
         gamma,
         random_state,
+        min_gap,
     )
 
 
@@ -164,11 +167,11 @@ def _lay_machines(block: Block, x: int, y: int, rotated: bool) -> tuple[tuple[st
     side = math.ceil(math.sqrt(len(members)))
     x0 = x + BLOCK_MARGIN
     y0 = y + BLOCK_MARGIN
-    # Cell pitch leaves a 1-tile gap between machines so Phase 7 can drop
-    # a power pole on the interior gap (4-machine block must be covered
-    # by a single medium pole — see PLAN.md Phase 7 test). The clustering
-    # footprint formula reserves enough margin for blocks up to side=5.
-    pitch_x, pitch_y = mw + 1, mh + 1
+    # Cell pitch leaves ``INTRA_BLOCK_GAP`` tiles of gap between machines
+    # so Phase 7c can drop chest + inserter pairs between any two
+    # neighbouring machines. The clustering footprint formula reserves
+    # matching margin for blocks up to side=5.
+    pitch_x, pitch_y = mw + INTRA_BLOCK_GAP, mh + INTRA_BLOCK_GAP
     ordered = sorted(members, key=lambda m: m.id)
     out: list[tuple[str, int, int]] = []
     for i, m in enumerate(ordered):
@@ -210,6 +213,7 @@ def _place_cp_sat(
     gamma: float,
     time_limit_s: float,
     random_state: int,
+    min_gap: int = 0,
 ) -> Placement:
     W, H = canvas
     model = cp_model.CpModel()
@@ -253,8 +257,24 @@ def _place_cp_sat(
         y_end = model.NewIntVar(0, H, f"ye_{b.id}")
         model.Add(x_end == x[b.id] + w[b.id])
         model.Add(y_end == y[b.id] + h[b.id])
-        x_iv.append(model.NewIntervalVar(x[b.id], w[b.id], x_end, f"xiv_{b.id}"))
-        y_iv.append(model.NewIntervalVar(y[b.id], h[b.id], y_end, f"yiv_{b.id}"))
+        # ``min_gap``: pad each block's no-overlap interval so consecutive
+        # blocks reserve extra empty tiles between them. The padded size is
+        # only used by ``AddNoOverlap2D`` — the actual placement and canvas
+        # bound use the un-padded ``w``/``h``.
+        if min_gap > 0:
+            w_pad = model.NewIntVar(lo + min_gap, hi + min_gap, f"wpad_{b.id}")
+            h_pad = model.NewIntVar(lo + min_gap, hi + min_gap, f"hpad_{b.id}")
+            model.Add(w_pad == w[b.id] + min_gap)
+            model.Add(h_pad == h[b.id] + min_gap)
+            xp_end = model.NewIntVar(0, W + min_gap, f"xpe_{b.id}")
+            yp_end = model.NewIntVar(0, H + min_gap, f"ype_{b.id}")
+            model.Add(xp_end == x[b.id] + w_pad)
+            model.Add(yp_end == y[b.id] + h_pad)
+            x_iv.append(model.NewIntervalVar(x[b.id], w_pad, xp_end, f"xiv_{b.id}"))
+            y_iv.append(model.NewIntervalVar(y[b.id], h_pad, yp_end, f"yiv_{b.id}"))
+        else:
+            x_iv.append(model.NewIntervalVar(x[b.id], w[b.id], x_end, f"xiv_{b.id}"))
+            y_iv.append(model.NewIntervalVar(y[b.id], h[b.id], y_end, f"yiv_{b.id}"))
 
     model.AddNoOverlap2D(x_iv, y_iv)
 
@@ -362,6 +382,7 @@ def _place_anneal(
     beta: float,
     gamma: float,
     random_state: int,
+    min_gap: int = 0,
 ) -> Placement:
     W, H = canvas
     rng = np.random.default_rng(random_state)
@@ -397,7 +418,7 @@ def _place_anneal(
 
     for _ in range(n_iter):
         move = rng.integers(0, 3)
-        new_state = _apply_move(state, block_ids, move, W, H, rng)
+        new_state = _apply_move(state, block_ids, move, W, H, rng, min_gap)
         if new_state is None:
             T *= 0.995
             continue
@@ -467,6 +488,7 @@ def _apply_move(
     W: int,
     H: int,
     rng: np.random.Generator,
+    min_gap: int = 0,
 ) -> dict[str, PlacedBlock] | None:
     new_state = dict(state)
     if move == 0 and len(block_ids) >= 2:
@@ -509,17 +531,17 @@ def _apply_move(
         for oid, o in new_state.items():
             if oid == mid:
                 continue
-            if _rects_overlap(m, o):
+            if _rects_overlap(m, o, min_gap):
                 return None
     return new_state
 
 
-def _rects_overlap(a: PlacedBlock, b: PlacedBlock) -> bool:
+def _rects_overlap(a: PlacedBlock, b: PlacedBlock, min_gap: int = 0) -> bool:
     return not (
-        a.x + a.width <= b.x
-        or b.x + b.width <= a.x
-        or a.y + a.height <= b.y
-        or b.y + b.height <= a.y
+        a.x + a.width + min_gap <= b.x
+        or b.x + b.width + min_gap <= a.x
+        or a.y + a.height + min_gap <= b.y
+        or b.y + b.height + min_gap <= a.y
     )
 
 

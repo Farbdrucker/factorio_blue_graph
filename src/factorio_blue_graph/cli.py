@@ -8,14 +8,20 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from factorio_blue_graph.export.blueprint_string import encode
+from factorio_blue_graph.export.blueprint_string import encode, encode_ports_sidecar
 from factorio_blue_graph.layout.clustering import cluster_into_blocks
-from factorio_blue_graph.layout.inserter import InserterResult
-from factorio_blue_graph.layout.io_chests import place_io_chests
+from factorio_blue_graph.layout.inserter import InserterResult, place_inserters
+from factorio_blue_graph.layout.io_chests import (
+    IOChestResult,
+    complete_machine_chests,
+    place_io_chests,
+    place_io_ports,
+    place_unresolved_edge_chests,
+)
 from factorio_blue_graph.layout.placement import PlacementError, place_blocks
 from factorio_blue_graph.layout.power import PoleResult, cover_with_poles
 from factorio_blue_graph.layout.power_source import emit_power_source
-from factorio_blue_graph.layout.routing import RoutingResult
+from factorio_blue_graph.layout.routing import RoutingResult, route_belts
 from factorio_blue_graph.model.graph import FlowGraph, RecipeHypergraph
 from factorio_blue_graph.optimize.pareto import pareto_sweep
 from factorio_blue_graph.planning.demand import DemandError, expand_demand
@@ -183,6 +189,59 @@ def _occupied_tiles(placement, routing, inserters, block_graph=None) -> frozense
     return frozenset(tiles)
 
 
+def _place_and_route_with_grow(
+    block_graph,
+    canvas_wh: tuple[int, int],
+    prog,
+):
+    """Run Phase 5 + Phase 6 with an auto-grow canvas safety net.
+
+    Belt-first plans need the router to succeed; rather than silently
+    degrading to chest fallbacks, retry placement + routing on a canvas
+    grown by 25% on each axis (capped at 2× the user's request). Returns
+    ``(placement, routing, canvas_actually_used)`` — the caller carries
+    on with whatever canvas size succeeded.
+    """
+    w0, h0 = canvas_wh
+    w_cap, h_cap = w0 * 2, h0 * 2
+    w, h = w0, h0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with prog.phase(5):
+                placement = place_blocks(block_graph, (w, h))
+        except PlacementError as exc:
+            if w >= w_cap and h >= h_cap:
+                console.print(f"[red]Placement failed:[/] {exc}")
+                raise typer.Exit(code=1) from exc
+            w, h = min(int(w * 1.25) + 1, w_cap), min(int(h * 1.25) + 1, h_cap)
+            console.print(
+                f"[yellow]warning:[/] placement failed on {canvas_wh}; "
+                f"retrying on grown canvas {w}×{h}."
+            )
+            continue
+        with prog.phase(6):
+            routing = route_belts(placement, block_graph)
+        prog.log(
+            f"  Phase 5: bbox {placement.bbox[0]}×{placement.bbox[1]} "
+            f"(solver: {placement.solver}, status: {placement.status})"
+        )
+        if routing.unresolved and (w < w_cap or h < h_cap):
+            prog.log(
+                f"  Phase 6: {len(routing.unresolved)} unresolved edge(s); "
+                f"growing canvas and retrying."
+            )
+            w, h = min(int(w * 1.25) + 1, w_cap), min(int(h * 1.25) + 1, h_cap)
+            continue
+        prog.log(
+            f"  Phase 6: {len(routing.paths)} belt paths, "
+            f"{len(routing.splitters)} splitters, "
+            f"{routing.ripup_count} ripups, status {routing.status}"
+        )
+        return placement, routing, (w, h)
+
+
 @app.command()
 def plan(
     item: str = typer.Argument(..., help="Target item, e.g. 'green-circuit'."),
@@ -202,6 +261,11 @@ def plan(
         "--sim-ticks",
         help="Sim warmup,measure ticks (60 ticks = 1 sec).",
     ),
+    io_mode: str = typer.Option(
+        "belts",
+        "--io-mode",
+        help="I/O topology: 'belts' (default) or 'chests' (legacy per-machine chests).",
+    ),
 ) -> None:
     """Plan a blueprint for ITEM at the given throughput rate."""
     try:
@@ -216,6 +280,10 @@ def plan(
 
     if item not in graph:
         console.print(f"[red]unknown item:[/] {item!r}")
+        raise typer.Exit(code=1)
+
+    if io_mode not in ("belts", "chests"):
+        console.print(f"[red]invalid --io-mode:[/] {io_mode!r} — expected 'belts' or 'chests'")
         raise typer.Exit(code=1)
 
     with PipelineProgress() as prog:
@@ -263,56 +331,139 @@ def plan(
             f"{len(block_graph.edges)} inter-block edges"
         )
 
-        # Phase 5: block placement
-        with prog.phase(5):
-            try:
-                placement = place_blocks(block_graph, canvas_wh)
-            except PlacementError as exc:
-                console.print(f"[red]Placement failed:[/] {exc}")
-                raise typer.Exit(code=1) from exc
-        prog.log(
-            f"  Phase 5: bbox {placement.bbox[0]}×{placement.bbox[1]} "
-            f"(solver: {placement.solver}, status: {placement.status})"
-        )
-
-        # Phase 6: belt routing — skipped in v1 functional-blueprint mode.
-        # The Phase 6 A* router produces brittle paths with head-to-head
-        # conflicts when blocks are close-packed; Phase 7c emits chests on
-        # every machine face which makes belt routing unnecessary for
-        # structural verification. Pareto / advanced flows can still call
-        # `route_belts` directly.
-        with prog.phase(6):
-            routing = RoutingResult(
-                paths=(),
-                splitters=(),
-                ripup_count=0,
-                unresolved=(),
-                status="SKIPPED",
-                canvas=placement.canvas,
+        # Phases 5 + 6: block placement + belt routing.
+        #
+        # Wrap both in a "auto-grow canvas" loop. If placement fails or
+        # the router leaves edges unresolved, retry on a canvas 25%
+        # larger on each axis (capped at 2× the user's request) so we
+        # keep belt-first instead of silently degrading to chests.
+        if io_mode == "belts":
+            placement, routing, canvas_wh = _place_and_route_with_grow(block_graph, canvas_wh, prog)
+        else:
+            with prog.phase(5):
+                try:
+                    placement = place_blocks(block_graph, canvas_wh)
+                except PlacementError as exc:
+                    console.print(f"[red]Placement failed:[/] {exc}")
+                    raise typer.Exit(code=1) from exc
+            prog.log(
+                f"  Phase 5: bbox {placement.bbox[0]}×{placement.bbox[1]} "
+                f"(solver: {placement.solver}, status: {placement.status})"
             )
-        prog.log("  Phase 6: skipped (chest-based io topology)")
+            with prog.phase(6):
+                routing = RoutingResult(
+                    paths=(),
+                    splitters=(),
+                    ripup_count=0,
+                    unresolved=(),
+                    status="SKIPPED",
+                    canvas=placement.canvas,
+                )
+            prog.log("  Phase 6: skipped (--io-mode chests)")
 
-        # Phase 7: inserters — no belts means nothing for the routed-belt
-        # inserter loop to do. Phase 7c emits all inserters via io_chests.
-        with prog.phase(7):
-            inserters = InserterResult(inserters=(), boundary_belts=(), unresolved=())
-        prog.log("  Phase 7: skipped (handled by Phase 7c io_chests)")
+        # Phase 7: inserters at routed belt endpoints (belt mode only).
+        if io_mode == "belts":
+            with prog.phase(7):
+                inserters = place_inserters(
+                    placement,
+                    block_graph,
+                    flow_graph,
+                    routing,
+                    emit_boundary_stubs=False,
+                )
+            prog.log(
+                f"  Phase 7: {len(inserters.inserters)} belt-side inserters"
+                + (
+                    f", {len(inserters.unresolved)} unresolved endpoints"
+                    if inserters.unresolved
+                    else ""
+                )
+            )
+        else:
+            with prog.phase(7):
+                inserters = InserterResult(inserters=(), boundary_belts=(), unresolved=())
+            prog.log("  Phase 7: skipped (--io-mode chests)")
 
-        # Phase 7c: input/output chests on every machine face. One chest +
-        # inserter pair per non-fluid ingredient (drop into the machine),
-        # one pair for the recipe's product (drop out of the machine).
-        # This makes every inserter have a real adjacent source/sink.
+        # Phase 7c: I/O chests.
+        # - belt mode: one raw-input chest per FlowGraph.external_in_edges
+        #   + one output-buffer chest per target-recipe machine, plus a
+        #   fallback chest pair for any inter-block edge Phase 6 left
+        #   unresolved.
+        # - chest mode: legacy per-machine per-ingredient chest grid.
         occupied_before_chests = set(_occupied_tiles(placement, routing, inserters, block_graph))
-        io = place_io_chests(placement, block_graph, flow_graph, occupied_before_chests)
-        inserters = InserterResult(
-            inserters=tuple(io.inserters),
-            boundary_belts=(),
-            unresolved=tuple(io.unresolved),
-        )
+        if io_mode == "belts":
+            io = place_io_ports(
+                placement,
+                block_graph,
+                flow_graph,
+                occupied_before_chests,
+                target_item=item,
+                recipe_graph=graph,
+            )
+            extra_chests = ()
+            extra_inserters: tuple = ()
+            if routing.unresolved:
+                fallback = place_unresolved_edge_chests(
+                    placement,
+                    block_graph,
+                    routing.unresolved,
+                    occupied_before_chests,
+                )
+                extra_chests = tuple(fallback.input_chests) + tuple(fallback.output_chests)
+                extra_inserters = tuple(fallback.inserters)
+                console.print(
+                    f"[yellow]warning:[/] {len(routing.unresolved)} inter-block edge(s) "
+                    f"could not be belt-routed; emitted chest fallback pairs."
+                )
+            if extra_chests or extra_inserters:
+                # Splice the fallback chests + inserters into the IO result.
+                io = IOChestResult(
+                    input_chests=tuple(io.input_chests),
+                    output_chests=tuple(io.output_chests) + extra_chests,
+                    inserters=tuple(io.inserters) + extra_inserters,
+                    ports=io.ports,
+                    unresolved=io.unresolved,
+                )
+            inserters = InserterResult(
+                inserters=tuple(inserters.inserters) + tuple(io.inserters),
+                boundary_belts=inserters.boundary_belts,
+                unresolved=tuple(inserters.unresolved) + tuple(io.unresolved),
+            )
+            # Top up: every machine needs its own input + output inserter
+            # so the structural verifier is satisfied. Phase 6 only stamps
+            # one belt-side inserter per block, leaving siblings uncovered.
+            completion = complete_machine_chests(
+                placement,
+                block_graph,
+                inserters.inserters,
+                occupied_before_chests,
+                target_item=item,
+                recipe_graph=graph,
+            )
+            if completion.input_chests or completion.output_chests or completion.inserters:
+                io = IOChestResult(
+                    input_chests=tuple(io.input_chests) + tuple(completion.input_chests),
+                    output_chests=tuple(io.output_chests) + tuple(completion.output_chests),
+                    inserters=tuple(io.inserters) + tuple(completion.inserters),
+                    ports=io.ports,
+                    unresolved=tuple(io.unresolved) + tuple(completion.unresolved),
+                )
+                inserters = InserterResult(
+                    inserters=tuple(inserters.inserters) + tuple(completion.inserters),
+                    boundary_belts=inserters.boundary_belts,
+                    unresolved=tuple(inserters.unresolved) + tuple(completion.unresolved),
+                )
+        else:
+            io = place_io_chests(placement, block_graph, flow_graph, occupied_before_chests)
+            inserters = InserterResult(
+                inserters=tuple(io.inserters),
+                boundary_belts=(),
+                unresolved=tuple(io.unresolved),
+            )
         prog.log(
             f"  Phase 7c: {len(io.input_chests)} input chests, "
             f"{len(io.output_chests)} output chests, "
-            f"{len(io.inserters)} io inserters"
+            f"{len(io.ports)} IOPort(s)"
         )
 
         # Phase 8: power poles — cover every machine AND every inserter
@@ -377,6 +528,7 @@ def plan(
             power=power,
             power_source=power_source,
             chests=all_chests,
+            external_ports=list(io.ports),
         )
         outcome = plan_with_repair(state)
         e, w, _ = outcome.report.counts()
@@ -448,6 +600,17 @@ def plan(
         prog.log(f"  Phase 9: blueprint string length {len(bp_string)} chars")
 
     Path(output).write_text(bp_string)
+    if final_state.external_ports:
+        sidecar = encode_ports_sidecar(
+            tuple(final_state.external_ports),
+            label=f"FBG {item} {rate:.0f}/min",
+            canvas=final_state.placement.canvas,
+        )
+        sidecar_path = Path(output + ".ports.json")
+        sidecar_path.write_text(sidecar)
+        console.print(
+            f"[dim]Wrote {len(final_state.external_ports)} I/O port(s) to {sidecar_path}[/]"
+        )
     console.print(f"\n[bold green]Done![/] Blueprint written to [cyan]{output}[/]")
     console.print("[dim]Paste into Factorio → Import String:[/]")
     preview = bp_string[:72] + "…" if len(bp_string) > 72 else bp_string
