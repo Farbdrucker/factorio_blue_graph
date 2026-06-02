@@ -38,6 +38,7 @@ from factorio_blue_graph.model.graph import (
 
 DEFAULT_MAX_BLOCK_SIZE = 16
 BLOCK_MARGIN = 2  # tiles of belt margin on each side, per spec
+INTRA_BLOCK_GAP = 2  # tiles of empty space between neighbouring machines
 
 
 def cluster_into_blocks(
@@ -177,10 +178,14 @@ def _build_block(idx: int, members: list[MachineNode]) -> Block:
     side = math.ceil(math.sqrt(k))
     mw = max(m.machine.footprint[0] for m in sorted_members)
     mh = max(m.machine.footprint[1] for m in sorted_members)
-    # Reserve 1 tile of inter-machine spacing on each axis (s-1 gaps for s
-    # cells) so Phase 7 can drop a power pole on the interior gap between
-    # machines. The 2-tile outer margin is unchanged.
-    gap = max(side - 1, 0)
+    # Reserve ``INTRA_BLOCK_GAP`` tiles of inter-machine spacing on each
+    # axis (s-1 gaps for s cells). A 2-tile gap gives Phase 7c room to
+    # drop a chest + inserter pair between any two neighbouring machines
+    # in the block, so the structural verifier finds an inserter for
+    # every machine even in densely packed blocks. The 2-tile outer
+    # margin is unchanged.
+    gap_per_seam = INTRA_BLOCK_GAP
+    gap = max(side - 1, 0) * gap_per_seam
     footprint = (
         side * mw + gap + 2 * BLOCK_MARGIN,
         side * mh + gap + 2 * BLOCK_MARGIN,

@@ -45,19 +45,22 @@ def test_eight_green_circuit_assemblers_collapse_to_one_block(
 
 
 def test_footprint_is_square_pack_plus_margin(gc_flow: FlowGraph) -> None:
+    from factorio_blue_graph.layout.clustering import INTRA_BLOCK_GAP
+
     bg = cluster_into_blocks(gc_flow)
     gc_block = bg.block_of(gc_flow.nodes_for_recipe("electronic-circuit")[0].id)
     # 8 assemblers, footprint 3×3 each → ceil(sqrt(8))=3, side=3.
-    # Footprint includes (side-1) inter-machine gap tiles so Phase 7 can
-    # drop a power pole in the interior gap between machines.
+    # Footprint includes (side-1) * INTRA_BLOCK_GAP inter-machine gap
+    # tiles so Phase 7c can drop a chest + inserter pair between
+    # neighbouring machines.
     side = 3
     mw = mh = 3
-    gap = side - 1
+    gap = (side - 1) * INTRA_BLOCK_GAP
     expected = (
         side * mw + gap + 2 * BLOCK_MARGIN,
         side * mh + gap + 2 * BLOCK_MARGIN,
     )
-    assert gc_block.footprint == expected == (15, 15)
+    assert gc_block.footprint == expected
 
 
 def test_max_block_size_caps_chunk(gc_flow: FlowGraph) -> None:

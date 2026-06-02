@@ -250,7 +250,15 @@ Dependencies (managed by `uv add`):
 - [x] `factorio_blue_graph.repair.throughput_loop.plan_with_throughput_repair` mirroring `plan_with_repair` (priority table, oscillation guard, best-state tracking, budget=4) with `enable_belt_routing` heal pass that promotes Phase 6 routing on `DISCONNECTED_FLOW`.
 - [x] CLI integration: Phase 8.6 block in `fbg plan`, `--no-simulate` escape hatch, `--sim-threshold`, `--sim-ticks`. Exit code 2 with rendered `SimReport` and **no blueprint written** when the heal budget is exhausted.
 - [x] Tests: 24 new tests under `tests/simulate/` covering runtime entities, report semantics, integration with `PlanState`, throughput-loop convergence and budget exhaustion. New CLI tests assert exit-code 2 on under-delivery and exit-code 0 with warning under `--no-simulate`.
-- [ ] Heavier heal passes (`bump_belt_tier`, `respace_and_replace`) — initial stubs return 0; finishing these requires teaching `place_blocks` about explicit spacing options.
+- [x] `respace_and_replace` re-runs Phase 5 + 6 with a `min_gap` kwarg on `place_blocks` (per-state counter, capped at 3). `bump_belt_tier` is still a stub — the structural router already picks the smallest tier ≥ flow, so tier-bumping needs a deeper per-edge re-routing pass.
+
+### Phase 14 — Belt-first default + modular IOPort sidecar
+
+- [x] `fbg plan` defaults to `--io-mode belts`: Phase 6 routing is always run, Phase 7 inserters bind to belt endpoints, Phase 7c is narrowed to (a) one input chest per `FlowGraph.external_in_edges` entry and (b) one output buffer chest per target-recipe machine. Legacy chest-per-machine grid stays available via `--io-mode chests`.
+- [x] Auto-grow canvas: `fbg plan` retries Phase 5 + 6 on a canvas 25% larger per axis (capped at 2×) when placement fails or the router leaves edges unresolved, so belt-first plans don't silently degrade to chest fallbacks.
+- [x] `complete_machine_chests` tops up per-machine chest+inserter pairs so the structural verifier finds an inserter for every machine even in densely packed blocks (intra-block gap widened to 2 tiles).
+- [x] `IOPort` entries are populated for every raw-input and target-output chest; the exporter writes them to `<output>.ports.json` as a sidecar so a future `fbg compose` step can stitch plans by matching `role="output"` ↔ `role="input"` by `item_id`.
+- [x] Tests: new `test_plan_belt_mode_default_emits_belts`, `test_plan_io_mode_chests_legacy`, `test_plan_writes_ports_sidecar`, `test_plan_bad_io_mode` in `tests/test_cli.py`.
 
 ---
 

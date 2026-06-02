@@ -23,6 +23,7 @@ from factorio_blue_graph.model.blueprint import (
     BeltSegment,
     Boiler,
     Chest,
+    IOPort,
     OffshorePump,
     PowerSourceResult,
     Splitter,
@@ -91,6 +92,37 @@ def decode(blueprint_string: str) -> dict:
     if not blueprint_string.startswith("0"):
         raise ValueError("not a Factorio blueprint string (missing leading '0')")
     return json.loads(zlib.decompress(base64.b64decode(blueprint_string[1:])))
+
+
+def encode_ports_sidecar(
+    ports: tuple[IOPort, ...],
+    *,
+    label: str,
+    canvas: tuple[int, int],
+) -> str:
+    """Serialize ``IOPort`` entries as a JSON sidecar.
+
+    The Factorio blueprint string stays vanilla; this sidecar exposes
+    the modular I/O surface (raw-input chests + target-output chests)
+    so a future ``fbg compose`` step can stitch plans together by
+    matching ``role="output"`` ports of one plan against ``role="input"``
+    ports of another by ``item_id``.
+    """
+    payload = {
+        "label": label,
+        "canvas": {"width": canvas[0], "height": canvas[1]},
+        "ports": [
+            {
+                "block_id": p.block_id,
+                "machine_id": p.machine_id,
+                "item_id": p.item_id,
+                "role": p.role,
+                "tile": {"x": p.canvas_edge_xy[0], "y": p.canvas_edge_xy[1]},
+            }
+            for p in ports
+        ],
+    }
+    return json.dumps(payload, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -335,4 +367,4 @@ def _build_icons(block_graph: BlockGraph) -> list[dict]:
     return icons
 
 
-__all__ = ["decode", "encode"]
+__all__ = ["decode", "encode", "encode_ports_sidecar"]

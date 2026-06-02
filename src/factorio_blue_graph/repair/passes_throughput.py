@@ -8,6 +8,7 @@ oscillation guard can move on.
 
 from __future__ import annotations
 
+from factorio_blue_graph.layout.placement import PlacementError, place_blocks
 from factorio_blue_graph.layout.routing import route_belts
 from factorio_blue_graph.model.blueprint import Inserter
 from factorio_blue_graph.repair.state import PlanState
@@ -18,6 +19,12 @@ _INSERTER_LADDER = {
     "long-handed-inserter": "fast-inserter",
     "fast-inserter": "stack-inserter",
 }
+
+# Per-state counter tracking how many times ``respace_and_replace`` has
+# fired for a given ``PlanState`` so each retry widens the gap a little
+# more. Capped at ``_MAX_RESPACE`` to keep the heal budget bounded.
+_RESPACE_COUNTER: dict[int, int] = {}
+_MAX_RESPACE = 3
 
 
 def enable_belt_routing(_issues: list[Bottleneck], state: PlanState) -> int:
@@ -75,16 +82,45 @@ def bump_belt_tier(_issues: list[Bottleneck], state: PlanState) -> int:
 
 
 def respace_and_replace(_issues: list[Bottleneck], state: PlanState) -> int:
-    """Stub for the heaviest heal.
+    """Re-run Phase 5+6 with a wider ``min_gap`` between blocks.
 
-    Re-placement with larger spacing is the explicit fallback for plans
-    with no attributable per-edge bottleneck. Wiring full re-placement
-    requires teaching ``place_blocks`` about explicit spacing options and
-    plumbing the downstream chest/pole rebuild — out of scope for the
-    initial implementation. Return 0 so budget exhausts cleanly when this
-    is the only remaining pass.
+    When ``OUTPUT_UNDERDELIVERY`` persists after ``enable_belt_routing``,
+    the most common cause is that two blocks are packed so close that
+    the A* router cannot find an unblocked corridor for one of their
+    inter-block belts (``RoutingResult.unresolved`` is non-empty). Adding
+    a 1-tile gap between blocks usually opens a corridor.
+
+    The pass is bounded per-state: ``min_gap`` starts at 1 and increases
+    by 1 each call, capped at ``_MAX_RESPACE``. Returns 0 (so the
+    throughput loop moves on) when:
+
+    * the cap is hit,
+    * re-placement fails (canvas too small for the wider gap), or
+    * re-routing still leaves edges unresolved.
     """
-    return 0
+    key = id(state)
+    used = _RESPACE_COUNTER.get(key, 0)
+    if used >= _MAX_RESPACE:
+        return 0
+    new_gap = used + 1
+    _RESPACE_COUNTER[key] = new_gap
+
+    try:
+        new_placement = place_blocks(
+            state.block_graph,
+            state.placement.canvas,
+            min_gap=new_gap,
+        )
+    except PlacementError:
+        return 0
+
+    new_routing = route_belts(new_placement, state.block_graph)
+    if new_routing.unresolved:
+        return 0
+
+    state.placement = new_placement
+    state.routing = new_routing
+    return 1
 
 
 __all__ = [
