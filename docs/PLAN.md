@@ -225,7 +225,7 @@ Dependencies (managed by `uv add`):
   - `fbg plan <item> --rate <items/min> --canvas WxH --output blueprint.txt`
   - `fbg pareto <item> --rate <items/min> --points 5`
   - `fbg recipes --search <substr>` (debug)
-  - `fbg graph <item> --rate <items/min> --output flow.dot [--render png]` — export the per-machine flow graph (machines + ore nodes, item/rate/lane/belt-tier edges) as Graphviz `.dot` (Phases 1–3 only); `export/dot.py:to_dot`
+  - `fbg graph <item> --rate <items/min> --output flow.dot [--render png]` — export the per-machine flow graph (machines + ore nodes, item/rate/lane/belt-tier edges) as Graphviz `.dot` (Phases 1–3 only); `export/dot.py:to_dot`. Per-item flows are routed through hexagonal **belt-merge nodes** (`export/dot.py:_merge_block`) that consolidate the many under-utilised per-machine trickles onto fully-loaded belts and show the real belt tier/lane count for the summed rate.
 - [x] `viz/progress.py`: `rich.progress.Progress` with one task per phase; show MILP iterations, CP-SAT branches, A* expansions
 - [x] Phase outputs streamed to stdout: "Phase 2: 18 assemblers, 4 chem plants"; "Phase 5: bbox 42×38"; "Phase 6: routed 14 belts (2 ripups)"
 - [x] On completion, write blueprint string to file and print copy-paste hint

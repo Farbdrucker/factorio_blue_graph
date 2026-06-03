@@ -56,6 +56,104 @@ def _edge_line(src: str, dst: str, item_label: str, rate: float) -> str:
     )
 
 
+def _merge_block(
+    merge_id: str,
+    item_label: str,
+    total_rate: float,
+    inbound: list[tuple[str, float]],
+    outbound: list[tuple[str, float]],
+) -> tuple[str, list[str]]:
+    """Build a belt-merge node plus its thin in/out edges.
+
+    Individual machines feed a trickle into the merge point and consumers tap a
+    trickle back out, so the in/out edges keep their honest per-machine rates.
+    The *consolidation* is shown on the node itself: a hexagon filled with the
+    belt-tier colour for the summed `total_rate`, labelled with the belt tier
+    and lane count that flow actually needs. This is what turns "125 machines
+    each on a near-empty yellow belt" into "1 fully-loaded yellow belt".
+    """
+    belt = pick_tier(total_rate)
+    color = _TIER_COLOR[belt.tier]
+    tier_name = belt.tier.name.lower()
+    node_label = f"{item_label}\\n{total_rate:.2f}/s\\n{belt.lane_count}× {tier_name} merge"
+    node = (
+        f"  {_q(merge_id)} [label={_q(node_label)}, "
+        f"shape=hexagon, style=filled, fillcolor={color}];"
+    )
+    edges = [_edge_line(src, merge_id, item_label, rate) for src, rate in inbound]
+    edges += [_edge_line(merge_id, dst, item_label, rate) for dst, rate in outbound]
+    return node, edges
+
+
+def _inter_machine_merges(
+    flow_graph: FlowGraph,
+    machine_plan: MachinePlan,
+    recipe_graph: RecipeHypergraph,
+) -> tuple[list[str], list[str]]:
+    """One merge node per `ItemChannel`, replacing the bipartite edge set.
+
+    The summed inbound trickles equal `channel.rate` exactly, so the merge
+    node's belt assignment matches Phase 3's own `assign_tiers` for the channel.
+    """
+    node_lines: list[str] = []
+    edge_lines: list[str] = []
+    for ch in flow_graph.channels:
+        prod_count = machine_plan.machine_counts.get(ch.producer_recipe, 0)
+        cons_count = machine_plan.machine_counts.get(ch.consumer_recipe, 0)
+        if prod_count <= 0 or cons_count <= 0:
+            continue
+        merge_id = f"merge:{ch.item_id}:{ch.producer_recipe}->{ch.consumer_recipe}"
+        item_label = _item_name(recipe_graph, ch.item_id)
+        inbound = [(f"{ch.producer_recipe}#{i}", ch.rate / prod_count) for i in range(prod_count)]
+        outbound = [(f"{ch.consumer_recipe}#{j}", ch.rate / cons_count) for j in range(cons_count)]
+        node, edges = _merge_block(merge_id, item_label, ch.rate, inbound, outbound)
+        node_lines.append(node)
+        edge_lines.extend(edges)
+    return node_lines, edge_lines
+
+
+def _raw_input_merges(
+    flow_graph: FlowGraph,
+    recipe_graph: RecipeHypergraph,
+) -> tuple[list[str], list[str]]:
+    """One merge node per (raw item, consumer recipe) consolidating ore feeds."""
+    groups: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    for ext in flow_graph.external_in_edges:
+        consumer_recipe = ext.consumer_node.rsplit("#", 1)[0]
+        groups.setdefault((ext.item_id, consumer_recipe), []).append((ext.consumer_node, ext.rate))
+
+    node_lines: list[str] = []
+    edge_lines: list[str] = []
+    for (item_id, consumer_recipe), consumers in groups.items():
+        total = sum(rate for _, rate in consumers)
+        merge_id = f"merge:raw:{item_id}->{consumer_recipe}"
+        item_label = _item_name(recipe_graph, item_id)
+        inbound = [("raw:" + item_id, total)]
+        node, edges = _merge_block(merge_id, item_label, total, inbound, consumers)
+        node_lines.append(node)
+        edge_lines.extend(edges)
+    return node_lines, edge_lines
+
+
+def _output_merges(
+    demand: DemandPlan,
+    machine_plan: MachinePlan,
+    recipe_graph: RecipeHypergraph,
+) -> tuple[list[str], list[str]]:
+    """A single merge node consolidating every target machine into the sink."""
+    target = demand.target_item
+    target_count = machine_plan.machine_counts.get(target, 0)
+    if target_count <= 0:
+        return [], []
+    total = demand.target_rate_per_sec
+    per_machine = total / target_count
+    merge_id = f"merge:out:{target}"
+    item_label = _item_name(recipe_graph, target)
+    inbound = [(f"{target}#{i}", per_machine) for i in range(target_count)]
+    node, edges = _merge_block(merge_id, item_label, total, inbound, [(_OUTPUT_NODE, total)])
+    return [node], edges
+
+
 def to_dot(
     demand: DemandPlan,
     machine_plan: MachinePlan,
@@ -96,30 +194,22 @@ def to_dot(
         f"shape=doublecircle, style=filled, fillcolor=palegreen];"
     )
 
+    # --- Belt-merge nodes consolidating trickles into loaded belts ---------
+    # Each group inserts a merge node between many under-utilised per-machine
+    # edges and the consumers, so the graph shows real belt loads rather than
+    # one near-empty belt per assembler.
+    raw_nodes, raw_edges = _raw_input_merges(flow_graph, recipe_graph)
+    inter_nodes, inter_edges = _inter_machine_merges(flow_graph, machine_plan, recipe_graph)
+    out_nodes, out_edges = _output_merges(demand, machine_plan, recipe_graph)
+    lines.extend(raw_nodes)
+    lines.extend(inter_nodes)
+    lines.extend(out_nodes)
+
     lines.append("")
 
-    # --- Raw-input edges: ore node -> consumer machine ---------------------
-    for ext in flow_graph.external_in_edges:
-        lines.append(
-            _edge_line(
-                "raw:" + ext.item_id,
-                ext.consumer_node,
-                _item_name(recipe_graph, ext.item_id),
-                ext.rate,
-            )
-        )
-
-    # --- Inter-machine edges from the flow MultiDiGraph --------------------
-    for src, dst, data in flow_graph.graph.edges(data=True):
-        lines.append(_edge_line(src, dst, _item_name(recipe_graph, data["item"]), data["rate"]))
-
-    # --- Output edges: target machines -> output sink ----------------------
-    target = demand.target_item
-    target_count = machine_plan.machine_counts.get(target, 0)
-    if target_count > 0:
-        per_machine = demand.target_rate_per_sec / target_count
-        for i in range(target_count):
-            lines.append(_edge_line(f"{target}#{i}", _OUTPUT_NODE, target_name, per_machine))
+    lines.extend(raw_edges)
+    lines.extend(inter_edges)
+    lines.extend(out_edges)
 
     lines.append("}")
     return "\n".join(lines) + "\n"
