@@ -23,6 +23,24 @@ def test_plan_unknown_item(tmp_path: Path) -> None:
     assert "unknown item" in result.output
 
 
+def test_graph_writes_dot(tmp_path: Path) -> None:
+    out = tmp_path / "flow.dot"
+    result = runner.invoke(app, ["graph", "green-circuit", "--rate", "60", "--output", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    text = out.read_text()
+    assert text.startswith("digraph factory {")
+    assert "doublecircle" in text
+
+
+def test_graph_unknown_item(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["graph", "no-such-item", "--rate", "60", "--output", str(tmp_path / "f.dot")]
+    )
+    assert result.exit_code == 1
+    assert "unknown item" in result.output
+
+
 def test_plan_default_rejects_chest_only_factory(tmp_path: Path) -> None:
     """Phase 8.6 must refuse to emit a blueprint that cannot deliver target.
 
