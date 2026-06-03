@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from factorio_blue_graph.export.blueprint_string import encode, encode_ports_sidecar
+from factorio_blue_graph.export.dot import to_dot
 from factorio_blue_graph.layout.clustering import cluster_into_blocks
 from factorio_blue_graph.layout.inserter import InserterResult, place_inserters
 from factorio_blue_graph.layout.io_chests import (
@@ -775,6 +776,75 @@ def verify(
         report.render(console)
 
     raise typer.Exit(code=0 if report.ok else 1)
+
+
+@app.command()
+def graph(
+    item: str = typer.Argument(..., help="Target item, e.g. 'green-circuit'."),
+    rate: float = typer.Option(..., "--rate", help="Items per minute."),
+    output: str = typer.Option("flow.dot", "--output", help="Output .dot file path."),
+    render: str = typer.Option(
+        None,
+        "--render",
+        help="Also render via Graphviz `dot` to this format (e.g. png, svg).",
+    ),
+) -> None:
+    """Export the per-machine flow graph for ITEM as a Graphviz .dot file.
+
+    Runs only Phases 1–3 (demand, machine counts, flow graph) — no placement
+    or routing — and writes a `.dot` describing machines and raw inputs as
+    nodes, with item/rate/lane/belt-tier-labelled edges.
+    """
+    rate_per_sec = rate / 60.0
+    recipe_graph = RecipeHypergraph.load_default()
+    item = _resolve_item(item)
+
+    if item not in recipe_graph:
+        console.print(f"[red]unknown item:[/] {item!r}")
+        raise typer.Exit(code=1)
+
+    try:
+        demand = expand_demand(item, rate_per_sec, recipe_graph)
+    except DemandError as exc:
+        console.print(f"[red]Demand error:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    try:
+        machine_plan = solve_machine_counts(demand, recipe_graph)
+    except MachinePlanError as exc:
+        console.print(f"[red]MILP error:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    flow_graph = FlowGraph.from_plan(demand, machine_plan, recipe_graph)
+
+    dot_text = to_dot(demand, machine_plan, flow_graph, recipe_graph, label=item)
+    out_path = Path(output)
+    out_path.write_text(dot_text)
+    console.print(
+        f"[green]wrote[/] {out_path} — {flow_graph.total_machines} machine nodes, "
+        f"{flow_graph.graph.number_of_edges() + len(flow_graph.external_in_edges)} edges"
+    )
+
+    if render:
+        import shutil
+        import subprocess
+
+        dot_bin = shutil.which("dot")
+        if dot_bin is None:
+            console.print(
+                "[yellow]warning:[/] Graphviz `dot` not found on PATH; "
+                "install Graphviz to render. The .dot file was still written."
+            )
+            return
+        rendered = out_path.with_suffix(f".{render}")
+        try:
+            subprocess.run(
+                [dot_bin, f"-T{render}", str(out_path), "-o", str(rendered)],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            console.print(f"[red]render failed:[/] {exc.stderr.decode(errors='replace').strip()}")
+            raise typer.Exit(code=1) from exc
+        console.print(f"[green]rendered[/] {rendered}")
 
 
 if __name__ == "__main__":
