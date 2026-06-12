@@ -261,6 +261,24 @@ Dependencies (managed by `uv add`):
 - [x] `IOPort` entries are populated for every raw-input and target-output chest; the exporter writes them to `<output>.ports.json` as a sidecar so a future `fbg compose` step can stitch plans by matching `role="output"` ↔ `role="input"` by `item_id`.
 - [x] Tests: new `test_plan_belt_mode_default_emits_belts`, `test_plan_io_mode_chests_legacy`, `test_plan_writes_ports_sidecar`, `test_plan_bad_io_mode` in `tests/test_cli.py`.
 
+### Phase 15 — Row-based correct-by-construction layout (`--layout rows`, default)
+
+The free-form CP-SAT + A* pipeline produced importable but non-functional
+blueprints (belts disconnected from machine I/O, chest fallbacks masking
+every gap, simulator 0/min). `layout/rows.py` replaces phases 5–8 on the
+default path with deterministic bands whose connectivity is guaranteed by
+construction; the legacy engine stays available via `--layout compact`.
+
+- [x] `layout/rows.py::build_row_layout`: one machine row per recipe stage in topological order; ingredient lanes directly above (A short / B long-handed) or below (C long-handed) each row; output lane below; inserters in fixed, verified geometry; feeder bands (chest→inserter→belt) for raw inputs and a sink band (belt→inserter→chest) for the target item.
+- [x] One continuous `BeltPath` per item channel: east/west corridor columns (pitch 3), underground hops under foreign columns, fan-out by snaking the same belt past every consumer lane. Verifier belt checks pass with zero issues.
+- [x] Deterministic pole grid (gap columns on both inserter rows, separator rows for feeder/sink bands) — full coverage, single wire-connected network; greedy set cover not used.
+- [x] Inserter sizing with face-budget-aware promotion (`_pick_within_budget`), 1.3× headroom against swing quantization; 2nd ingredient falls back to lane C when the top face is over budget.
+- [x] Simulator extension: `Topology.belt_by_tile` index + belt endpoints in `_resolve_endpoint`/`_withdraw`/`_deposit`, so inserters move items via belts (was unimplemented — every belt plan simulated 0/min). Inserter iteration order rotates per tick for fair shared-lane access; machine input buffers capped at 4 crafts per ingredient.
+- [x] Verifier fixes: `BeltCell`/`UndergroundCell`/`SplitterCell` added to inserter `_SINK_TYPES` (machine→belt drops were flagged and repair-flipped); `STARVED_INPUT` skips `FLUID_INPUTS` like the other checks.
+- [x] CLI: `--layout rows|compact` (rows default), demand overprovisioned ×1.15 in rows mode, canvas computed (`--canvas` only used by compact), sim warmup scaled to 250 ticks/machine on the default window. Phase 8.6 simulation runs by default and passes (no `--no-simulate` needed).
+- [x] Tests: `tests/layout/test_rows.py` (occupancy, inserter geometry, belt continuity, fan-out, lane C, pole coverage + connectivity, single-lane limit, IOPorts); e2e runs the full simulated pipeline and asserts `fbg verify` is clean and the target rate is met.
+- [ ] v1 limits, deferred: flows beyond one blue belt per item (45/s) raise `RowLayoutError`; >3 solid ingredients per recipe unsupported; fluids unpiped and furnace fuel unmodeled (consistent with lp/verify/sim).
+
 ---
 
 ## Verification recipe for any agent
@@ -272,14 +290,12 @@ uv sync
 uv run ruff format
 uv run ruff check --fix
 uv run pytest -q
-uv run fbg plan green-circuit --rate 60 --canvas 60x60 --output /tmp/bp.txt --no-simulate
+uv run fbg plan green-circuit --rate 60 --output /tmp/bp.txt
 ```
 
-The final command must terminate within 60s and produce a non-empty
-blueprint string in `/tmp/bp.txt`. `--no-simulate` skips Phase 8.6
-throughput verification, which currently rejects the chest-only topology
-emitted by Phase 7c. Drop the flag once Phase 13's heavier heal passes
-are wired in.
+The final command must terminate within 60s, pass the Phase 8.6
+throughput simulation (exit 0), and produce a non-empty blueprint
+string in `/tmp/bp.txt` plus a `.ports.json` sidecar.
 
 ---
 

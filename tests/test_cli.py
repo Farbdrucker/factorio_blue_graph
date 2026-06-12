@@ -112,6 +112,8 @@ def test_plan_io_mode_chests_legacy(tmp_path: Path) -> None:
             "--output",
             str(out),
             "--no-simulate",
+            "--layout",
+            "compact",
             "--io-mode",
             "chests",
         ],

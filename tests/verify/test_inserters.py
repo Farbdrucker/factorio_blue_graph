@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from factorio_blue_graph.model.blueprint import DIR_E, DIR_N
+from factorio_blue_graph.model.blueprint import DIR_E, DIR_N, DIR_S
 from factorio_blue_graph.verify import inserters
 from factorio_blue_graph.verify.grid import (
     BeltCell,
@@ -10,6 +10,7 @@ from factorio_blue_graph.verify.grid import (
     InserterCell,
     MachineCell,
     TileGrid,
+    UndergroundCell,
 )
 from factorio_blue_graph.verify.report import VerifyReport
 
@@ -84,4 +85,26 @@ def test_long_handed_inserter_uses_reach_2():
     report = VerifyReport()
     inserters.check_string_only(grid, report)
     # Drop tile = (6, 5) → machine ✓; pickup tile = (6, 9) → belt ✓.
+    assert not [i for i in report.issues if i.severity.name == "ERROR"]
+
+
+def test_belt_qualifies_as_drop_target():
+    """Machine→belt output inserters are the core belt-layout pattern."""
+    grid = TileGrid((20, 20))
+    _machine(grid, 5, 2, 3, 3)  # machine north of inserter
+    grid.put(6, 6, BeltCell(direction=DIR_E, name="transport-belt"))  # drop tile south
+    grid.put(6, 5, InserterCell(direction=DIR_S, name="inserter"))
+    report = VerifyReport()
+    inserters.check_string_only(grid, report)
+    # Pickup = machine (6, 4), drop = belt (6, 6): both valid.
+    assert not [i for i in report.issues if i.severity.name == "ERROR"]
+
+
+def test_underground_belt_qualifies_as_drop_target():
+    grid = TileGrid((20, 20))
+    _machine(grid, 5, 2, 3, 3)
+    grid.put(6, 6, UndergroundCell(direction=DIR_E, name="underground-belt", io_type="input"))
+    grid.put(6, 5, InserterCell(direction=DIR_S, name="inserter"))
+    report = VerifyReport()
+    inserters.check_string_only(grid, report)
     assert not [i for i in report.issues if i.severity.name == "ERROR"]

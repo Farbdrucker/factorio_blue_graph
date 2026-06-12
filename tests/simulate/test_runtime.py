@@ -99,6 +99,8 @@ def test_belt_path_capacity_caps_inflow():
 
 
 def test_machine_cap_clamps_input():
+    # A machine buffers at most 4 crafts' worth of an ingredient (Factorio
+    # inserters stop overfilling), never more than MACHINE_INPUT_CAP.
     m = _gear_machine()
     accepted = m.take_input("iron-plate", MACHINE_INPUT_CAP * 2)
-    assert accepted == MACHINE_INPUT_CAP
+    assert accepted == min(MACHINE_INPUT_CAP, 4 * m.inputs_per_craft["iron-plate"])

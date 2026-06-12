@@ -1,8 +1,8 @@
 """Inserter-orientation and orphan checks.
 
 * `WRONG_INSERTER_DIRECTION`: an inserter's drop tile must hit a machine,
-  chest, or generator footprint (a sink); its pickup tile must hit a
-  belt, machine, or chest (a source). Either side empty is a structural
+  chest, belt, or generator footprint (a sink); its pickup tile must hit
+  a belt, machine, or chest (a source). Either side empty is a structural
   bug.
 * `ORPHAN_INSERTER`: an inserter whose both ends fail the above is more
   severe — the repair pass deletes it outright.
@@ -38,8 +38,17 @@ _REACH = {
     "long-handed-inserter": 2,
 }
 
-# Entity types valid on the drop side (sink): machines, chests, generators.
-_SINK_TYPES = (MachineCell, ChestCell, BoilerCell, SteamCell)
+# Entity types valid on the drop side (sink): machines, chests, generators,
+# and belts (machine→belt output inserters are a core belt-layout pattern).
+_SINK_TYPES = (
+    MachineCell,
+    ChestCell,
+    BoilerCell,
+    SteamCell,
+    BeltCell,
+    UndergroundCell,
+    SplitterCell,
+)
 # Entity types valid on the pickup side (source).
 _SOURCE_TYPES = (MachineCell, ChestCell, BeltCell, UndergroundCell, SplitterCell)
 
@@ -91,7 +100,7 @@ def _scan(grid: TileGrid, report: VerifyReport) -> None:
                     severity=Severity.ERROR,
                     message=(
                         f"inserter at {tile}: drop tile {drop_tile} has "
-                        f"{_describe(drop_ent)}, expected machine/chest"
+                        f"{_describe(drop_ent)}, expected machine/chest/belt"
                     ),
                     location=tile,
                     payload={

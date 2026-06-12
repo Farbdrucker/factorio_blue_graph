@@ -23,6 +23,7 @@ from factorio_blue_graph.layout.placement import PlacementError, place_blocks
 from factorio_blue_graph.layout.power import PoleResult, cover_with_poles
 from factorio_blue_graph.layout.power_source import emit_power_source
 from factorio_blue_graph.layout.routing import RoutingResult, route_belts
+from factorio_blue_graph.layout.rows import RowLayoutError, build_row_layout
 from factorio_blue_graph.model.graph import FlowGraph, RecipeHypergraph
 from factorio_blue_graph.optimize.pareto import pareto_sweep
 from factorio_blue_graph.planning.demand import DemandError, expand_demand
@@ -35,6 +36,15 @@ from factorio_blue_graph.viz.progress import PipelineProgress
 
 app = typer.Typer(help="Factorio Blue Graph — plan and optimize blueprints.")
 console = Console()
+
+# The rows layout sizes machines for a slightly higher rate than requested:
+# every belt/inserter transfer point loses a few percent to swing
+# quantization, and those losses compound down the production chain.
+_ROWS_OVERPROVISION = 1.15
+# Deep plans need a longer simulated warmup before steady state; scale with
+# machine count (ticks per machine) when the user keeps the default window.
+_ROWS_WARMUP_PER_MACHINE = 250
+_DEFAULT_SIM_TICKS = "1800,3600"
 
 # Common colloquial aliases → canonical item IDs in the dataset.
 _ITEM_ALIASES: dict[str, str] = {
@@ -258,7 +268,7 @@ def plan(
         help="Min achieved/target ratio to accept a plan.",
     ),
     sim_ticks: str = typer.Option(
-        "1800,3600",
+        _DEFAULT_SIM_TICKS,
         "--sim-ticks",
         help="Sim warmup,measure ticks (60 ticks = 1 sec).",
     ),
@@ -266,6 +276,14 @@ def plan(
         "belts",
         "--io-mode",
         help="I/O topology: 'belts' (default) or 'chests' (legacy per-machine chests).",
+    ),
+    layout: str = typer.Option(
+        "rows",
+        "--layout",
+        help=(
+            "Layout engine: 'rows' (deterministic bands, guaranteed-working "
+            "belts; default) or 'compact' (legacy CP-SAT + A*, experimental)."
+        ),
     ),
 ) -> None:
     """Plan a blueprint for ITEM at the given throughput rate."""
@@ -287,11 +305,21 @@ def plan(
         console.print(f"[red]invalid --io-mode:[/] {io_mode!r} — expected 'belts' or 'chests'")
         raise typer.Exit(code=1)
 
+    if layout not in ("rows", "compact"):
+        console.print(f"[red]invalid --layout:[/] {layout!r} — expected 'rows' or 'compact'")
+        raise typer.Exit(code=1)
+    if layout == "rows" and io_mode == "chests":
+        console.print("[yellow]warning:[/] --io-mode is a compact-layout option; ignored.")
+
+    # The rows engine sizes machines/belts/inserters for a slightly higher
+    # rate so the simulated steady state clears the requested one.
+    sizing_rate = rate_per_sec * (_ROWS_OVERPROVISION if layout == "rows" else 1.0)
+
     with PipelineProgress() as prog:
         # Phase 1: demand propagation
         with prog.phase(1):
             try:
-                demand = expand_demand(item, rate_per_sec, graph)
+                demand = expand_demand(item, sizing_rate, graph)
             except DemandError as exc:
                 console.print(f"[red]Demand error:[/] {exc}")
                 raise typer.Exit(code=1) from exc
@@ -332,159 +360,203 @@ def plan(
             f"{len(block_graph.edges)} inter-block edges"
         )
 
-        # Phases 5 + 6: block placement + belt routing.
-        #
-        # Wrap both in a "auto-grow canvas" loop. If placement fails or
-        # the router leaves edges unresolved, retry on a canvas 25%
-        # larger on each axis (capped at 2× the user's request) so we
-        # keep belt-first instead of silently degrading to chests.
-        if io_mode == "belts":
-            placement, routing, canvas_wh = _place_and_route_with_grow(block_graph, canvas_wh, prog)
-        else:
+        # Phases 5-8 (rows layout): deterministic correct-by-construction
+        # bands replace placement, routing, inserters, chests and pole cover.
+        if layout == "rows":
             with prog.phase(5):
                 try:
-                    placement = place_blocks(block_graph, canvas_wh)
-                except PlacementError as exc:
-                    console.print(f"[red]Placement failed:[/] {exc}")
+                    row = build_row_layout(flow_graph, block_graph, graph, demand, item)
+                except RowLayoutError as exc:
+                    console.print(f"[red]Row layout failed:[/] {exc}")
                     raise typer.Exit(code=1) from exc
+            placement = row.placement
+            routing = row.routing
+            canvas_wh = row.canvas
             prog.log(
-                f"  Phase 5: bbox {placement.bbox[0]}×{placement.bbox[1]} "
-                f"(solver: {placement.solver}, status: {placement.status})"
+                f"  Phase 5: rows layout, canvas {canvas_wh[0]}×{canvas_wh[1]} "
+                "(computed; --canvas not used)"
             )
             with prog.phase(6):
-                routing = RoutingResult(
-                    paths=(),
-                    splitters=(),
-                    ripup_count=0,
-                    unresolved=(),
-                    status="SKIPPED",
-                    canvas=placement.canvas,
-                )
-            prog.log("  Phase 6: skipped (--io-mode chests)")
-
-        # Phase 7: inserters at routed belt endpoints (belt mode only).
-        if io_mode == "belts":
+                pass
+            prog.log(f"  Phase 6: {len(routing.paths)} belt paths, status {routing.status}")
             with prog.phase(7):
-                inserters = place_inserters(
+                inserters = row.inserters
+            prog.log(
+                f"  Phase 7: {len(inserters.inserters)} inserters, "
+                f"{len(row.chests)} chests, {len(row.ports)} IOPort(s)"
+            )
+            all_chests = list(row.chests)
+            ports = list(row.ports)
+            with prog.phase(8):
+                power = row.poles
+            prog.log(f"  Phase 8: {len(power.poles)} power poles (deterministic grid)")
+            occupied = set(_occupied_tiles(placement, routing, inserters, block_graph))
+            occupied |= {(c.x, c.y) for c in all_chests}
+            io_tiles = {(i.x, i.y) for i in inserters.inserters}
+            io_tiles |= {(c.x, c.y) for c in all_chests}
+        else:
+            # Phases 5 + 6: block placement + belt routing.
+            #
+            # Wrap both in a "auto-grow canvas" loop. If placement fails or
+            # the router leaves edges unresolved, retry on a canvas 25%
+            # larger on each axis (capped at 2× the user's request) so we
+            # keep belt-first instead of silently degrading to chests.
+            if io_mode == "belts":
+                placement, routing, canvas_wh = _place_and_route_with_grow(
+                    block_graph, canvas_wh, prog
+                )
+            else:
+                with prog.phase(5):
+                    try:
+                        placement = place_blocks(block_graph, canvas_wh)
+                    except PlacementError as exc:
+                        console.print(f"[red]Placement failed:[/] {exc}")
+                        raise typer.Exit(code=1) from exc
+                prog.log(
+                    f"  Phase 5: bbox {placement.bbox[0]}×{placement.bbox[1]} "
+                    f"(solver: {placement.solver}, status: {placement.status})"
+                )
+                with prog.phase(6):
+                    routing = RoutingResult(
+                        paths=(),
+                        splitters=(),
+                        ripup_count=0,
+                        unresolved=(),
+                        status="SKIPPED",
+                        canvas=placement.canvas,
+                    )
+                prog.log("  Phase 6: skipped (--io-mode chests)")
+
+            # Phase 7: inserters at routed belt endpoints (belt mode only).
+            if io_mode == "belts":
+                with prog.phase(7):
+                    inserters = place_inserters(
+                        placement,
+                        block_graph,
+                        flow_graph,
+                        routing,
+                        emit_boundary_stubs=False,
+                    )
+                prog.log(
+                    f"  Phase 7: {len(inserters.inserters)} belt-side inserters"
+                    + (
+                        f", {len(inserters.unresolved)} unresolved endpoints"
+                        if inserters.unresolved
+                        else ""
+                    )
+                )
+            else:
+                with prog.phase(7):
+                    inserters = InserterResult(inserters=(), boundary_belts=(), unresolved=())
+                prog.log("  Phase 7: skipped (--io-mode chests)")
+
+            # Phase 7c: I/O chests.
+            # - belt mode: one raw-input chest per FlowGraph.external_in_edges
+            #   + one output-buffer chest per target-recipe machine, plus a
+            #   fallback chest pair for any inter-block edge Phase 6 left
+            #   unresolved.
+            # - chest mode: legacy per-machine per-ingredient chest grid.
+            occupied_before_chests = set(
+                _occupied_tiles(placement, routing, inserters, block_graph)
+            )
+            if io_mode == "belts":
+                io = place_io_ports(
                     placement,
                     block_graph,
                     flow_graph,
-                    routing,
-                    emit_boundary_stubs=False,
+                    occupied_before_chests,
+                    target_item=item,
+                    recipe_graph=graph,
                 )
-            prog.log(
-                f"  Phase 7: {len(inserters.inserters)} belt-side inserters"
-                + (
-                    f", {len(inserters.unresolved)} unresolved endpoints"
-                    if inserters.unresolved
-                    else ""
+                extra_chests = ()
+                extra_inserters: tuple = ()
+                if routing.unresolved:
+                    fallback = place_unresolved_edge_chests(
+                        placement,
+                        block_graph,
+                        routing.unresolved,
+                        occupied_before_chests,
+                    )
+                    extra_chests = tuple(fallback.input_chests) + tuple(fallback.output_chests)
+                    extra_inserters = tuple(fallback.inserters)
+                    console.print(
+                        f"[yellow]warning:[/] {len(routing.unresolved)} inter-block edge(s) "
+                        f"could not be belt-routed; emitted chest fallback pairs."
+                    )
+                if extra_chests or extra_inserters:
+                    # Splice the fallback chests + inserters into the IO result.
+                    io = IOChestResult(
+                        input_chests=tuple(io.input_chests),
+                        output_chests=tuple(io.output_chests) + extra_chests,
+                        inserters=tuple(io.inserters) + extra_inserters,
+                        ports=io.ports,
+                        unresolved=io.unresolved,
+                    )
+                inserters = InserterResult(
+                    inserters=tuple(inserters.inserters) + tuple(io.inserters),
+                    boundary_belts=inserters.boundary_belts,
+                    unresolved=tuple(inserters.unresolved) + tuple(io.unresolved),
                 )
-            )
-        else:
-            with prog.phase(7):
-                inserters = InserterResult(inserters=(), boundary_belts=(), unresolved=())
-            prog.log("  Phase 7: skipped (--io-mode chests)")
-
-        # Phase 7c: I/O chests.
-        # - belt mode: one raw-input chest per FlowGraph.external_in_edges
-        #   + one output-buffer chest per target-recipe machine, plus a
-        #   fallback chest pair for any inter-block edge Phase 6 left
-        #   unresolved.
-        # - chest mode: legacy per-machine per-ingredient chest grid.
-        occupied_before_chests = set(_occupied_tiles(placement, routing, inserters, block_graph))
-        if io_mode == "belts":
-            io = place_io_ports(
-                placement,
-                block_graph,
-                flow_graph,
-                occupied_before_chests,
-                target_item=item,
-                recipe_graph=graph,
-            )
-            extra_chests = ()
-            extra_inserters: tuple = ()
-            if routing.unresolved:
-                fallback = place_unresolved_edge_chests(
+                # Top up: every machine needs its own input + output inserter
+                # so the structural verifier is satisfied. Phase 6 only stamps
+                # one belt-side inserter per block, leaving siblings uncovered.
+                completion = complete_machine_chests(
                     placement,
                     block_graph,
-                    routing.unresolved,
+                    inserters.inserters,
                     occupied_before_chests,
+                    target_item=item,
+                    recipe_graph=graph,
                 )
-                extra_chests = tuple(fallback.input_chests) + tuple(fallback.output_chests)
-                extra_inserters = tuple(fallback.inserters)
-                console.print(
-                    f"[yellow]warning:[/] {len(routing.unresolved)} inter-block edge(s) "
-                    f"could not be belt-routed; emitted chest fallback pairs."
-                )
-            if extra_chests or extra_inserters:
-                # Splice the fallback chests + inserters into the IO result.
-                io = IOChestResult(
-                    input_chests=tuple(io.input_chests),
-                    output_chests=tuple(io.output_chests) + extra_chests,
-                    inserters=tuple(io.inserters) + extra_inserters,
-                    ports=io.ports,
-                    unresolved=io.unresolved,
-                )
-            inserters = InserterResult(
-                inserters=tuple(inserters.inserters) + tuple(io.inserters),
-                boundary_belts=inserters.boundary_belts,
-                unresolved=tuple(inserters.unresolved) + tuple(io.unresolved),
-            )
-            # Top up: every machine needs its own input + output inserter
-            # so the structural verifier is satisfied. Phase 6 only stamps
-            # one belt-side inserter per block, leaving siblings uncovered.
-            completion = complete_machine_chests(
-                placement,
-                block_graph,
-                inserters.inserters,
-                occupied_before_chests,
-                target_item=item,
-                recipe_graph=graph,
-            )
-            if completion.input_chests or completion.output_chests or completion.inserters:
-                io = IOChestResult(
-                    input_chests=tuple(io.input_chests) + tuple(completion.input_chests),
-                    output_chests=tuple(io.output_chests) + tuple(completion.output_chests),
-                    inserters=tuple(io.inserters) + tuple(completion.inserters),
-                    ports=io.ports,
-                    unresolved=tuple(io.unresolved) + tuple(completion.unresolved),
-                )
+                if completion.input_chests or completion.output_chests or completion.inserters:
+                    io = IOChestResult(
+                        input_chests=tuple(io.input_chests) + tuple(completion.input_chests),
+                        output_chests=tuple(io.output_chests) + tuple(completion.output_chests),
+                        inserters=tuple(io.inserters) + tuple(completion.inserters),
+                        ports=io.ports,
+                        unresolved=tuple(io.unresolved) + tuple(completion.unresolved),
+                    )
+                    inserters = InserterResult(
+                        inserters=tuple(inserters.inserters) + tuple(completion.inserters),
+                        boundary_belts=inserters.boundary_belts,
+                        unresolved=tuple(inserters.unresolved) + tuple(completion.unresolved),
+                    )
+            else:
+                io = place_io_chests(placement, block_graph, flow_graph, occupied_before_chests)
                 inserters = InserterResult(
-                    inserters=tuple(inserters.inserters) + tuple(completion.inserters),
-                    boundary_belts=inserters.boundary_belts,
-                    unresolved=tuple(inserters.unresolved) + tuple(completion.unresolved),
+                    inserters=tuple(io.inserters),
+                    boundary_belts=(),
+                    unresolved=tuple(io.unresolved),
                 )
-        else:
-            io = place_io_chests(placement, block_graph, flow_graph, occupied_before_chests)
-            inserters = InserterResult(
-                inserters=tuple(io.inserters),
-                boundary_belts=(),
-                unresolved=tuple(io.unresolved),
+            prog.log(
+                f"  Phase 7c: {len(io.input_chests)} input chests, "
+                f"{len(io.output_chests)} output chests, "
+                f"{len(io.ports)} IOPort(s)"
             )
-        prog.log(
-            f"  Phase 7c: {len(io.input_chests)} input chests, "
-            f"{len(io.output_chests)} output chests, "
-            f"{len(io.ports)} IOPort(s)"
-        )
 
-        # Phase 8: power poles — cover every machine AND every inserter
-        # AND every chest tile so the verifier sees no `UNPOWERED_*`.
-        with prog.phase(8):
-            occupied = set(_occupied_tiles(placement, routing, inserters, block_graph))
-            occupied |= {(c.x, c.y) for c in io.input_chests}
-            occupied |= {(c.x, c.y) for c in io.output_chests}
-            io_tiles = set()
-            for ins in inserters.inserters:
-                io_tiles.add((ins.x, ins.y))
-            for c in io.input_chests:
-                io_tiles.add((c.x, c.y))
-            for c in io.output_chests:
-                io_tiles.add((c.x, c.y))
-            power = cover_with_poles(
-                placement, block_graph, frozenset(occupied), extra_targets=io_tiles
+            # Phase 8: power poles — cover every machine AND every inserter
+            # AND every chest tile so the verifier sees no `UNPOWERED_*`.
+            with prog.phase(8):
+                occupied = set(_occupied_tiles(placement, routing, inserters, block_graph))
+                occupied |= {(c.x, c.y) for c in io.input_chests}
+                occupied |= {(c.x, c.y) for c in io.output_chests}
+                io_tiles = set()
+                for ins in inserters.inserters:
+                    io_tiles.add((ins.x, ins.y))
+                for c in io.input_chests:
+                    io_tiles.add((c.x, c.y))
+                for c in io.output_chests:
+                    io_tiles.add((c.x, c.y))
+                power = cover_with_poles(
+                    placement, block_graph, frozenset(occupied), extra_targets=io_tiles
+                )
+            uncov = (
+                f", {len(power.uncovered_machines)} uncovered" if power.uncovered_machines else ""
             )
-        uncov = f", {len(power.uncovered_machines)} uncovered" if power.uncovered_machines else ""
-        prog.log(f"  Phase 8: {len(power.poles)} power poles{uncov}")
+            prog.log(f"  Phase 8: {len(power.poles)} power poles{uncov}")
+
+            all_chests = list(io.input_chests) + list(io.output_chests)
+            ports = list(io.ports)
 
         # Phase 8b: emit a steam-engine + boiler + offshore-pump cluster.
         power_source = emit_power_source(placement, block_graph, routing, inserters)
@@ -519,7 +591,6 @@ def plan(
                 prog.log(f"  Phase 8c: {len(bridge)} trunk poles bridging power network")
 
         # Phase 8.5: verifier + repair loop.
-        all_chests = list(io.input_chests) + list(io.output_chests)
         state = PlanState(
             placement=placement,
             block_graph=block_graph,
@@ -529,7 +600,7 @@ def plan(
             power=power,
             power_source=power_source,
             chests=all_chests,
-            external_ports=list(io.ports),
+            external_ports=ports,
         )
         outcome = plan_with_repair(state)
         e, w, _ = outcome.report.counts()
@@ -556,6 +627,11 @@ def plan(
                     f"[red]invalid --sim-ticks:[/] {sim_ticks!r} — expected WARMUP,MEASURE"
                 )
                 raise typer.Exit(code=1) from None
+            if layout == "rows" and sim_ticks == _DEFAULT_SIM_TICKS:
+                warmup_ticks_n = max(
+                    warmup_ticks_n,
+                    _ROWS_WARMUP_PER_MACHINE * machine_plan.total_machines,
+                )
             with prog.phase(10):
                 tp = plan_with_throughput_repair(
                     outcome.state,
@@ -756,9 +832,13 @@ def verify(
 ) -> None:
     """Run structural checks on any blueprint string."""
     blueprint_text = bp
-    candidate = Path(bp)
-    if candidate.exists() and candidate.is_file():
-        blueprint_text = candidate.read_text().strip()
+    try:
+        candidate = Path(bp)
+        if candidate.exists() and candidate.is_file():
+            blueprint_text = candidate.read_text().strip()
+    except OSError:
+        # A long blueprint string is not a valid path (ENAMETOOLONG).
+        pass
     try:
         report = verify_blueprint_string(blueprint_text)
     except ValueError as exc:

@@ -151,3 +151,110 @@ def test_iron_smelter_with_raw_ore_chest_produces_iron_plate():
     # but the sim should at least be producing something.
     assert report.total_crafts_by_recipe.get("iron-plate", 0) > 0
     _ = DIR_E  # silence unused-import lint when this assert structure changes
+
+
+def test_belt_carries_items_from_chest_to_machine():
+    """chest → inserter → belt → inserter → machine → inserter → chest.
+
+    Verifies the belt endpoint resolution: inserters can drop onto belt
+    heads and pick from belt tails, so belt-routed plans simulate >0/min.
+    """
+    from factorio_blue_graph.layout.placement import PlacedBlock
+    from factorio_blue_graph.layout.routing import BeltPath
+    from factorio_blue_graph.layout.tier import BeltTier
+    from factorio_blue_graph.model.blueprint import BeltSegment, Chest, Inserter
+    from factorio_blue_graph.model.graph import Block, MachineNode
+    from factorio_blue_graph.planning.lp import STONE_FURNACE
+
+    canvas = (20, 20)
+    smelter_id = "iron-plate#0"
+    node = MachineNode(
+        id=smelter_id,
+        recipe_id="iron-plate",
+        machine=STONE_FURNACE,
+        crafts_per_sec=1.0,
+    )
+    block = Block(
+        id="block_iron",
+        members=(node,),
+        recipes=("iron-plate",),
+        footprint=(STONE_FURNACE.footprint[0] + 4, STONE_FURNACE.footprint[1] + 4),
+        primary_recipe="iron-plate",
+    )
+    bg = BlockGraph()
+    bg.add_block(block)
+
+    # Machine 2x2 at (10, 5) → occupies (10..11, 5..6).
+    placed = PlacedBlock(
+        block_id="block_iron",
+        x=9,
+        y=4,
+        rotated=False,
+        width=block.footprint[0],
+        height=block.footprint[1],
+        machine_tiles=((smelter_id, 10, 5),),
+    )
+    placement = Placement(
+        blocks={"block_iron": placed},
+        canvas=canvas,
+        bbox=block.footprint,
+        flow_weighted_distance=0.0,
+        status="OPTIMAL",
+        solver="cp-sat",
+    )
+
+    # Ore chest at (2,2); inserter at (2,3) facing S=4 drops onto belt head (2,4).
+    ore_chest = Chest(x=2, y=2, name="wooden-chest", item_id="iron-ore")
+    feed_inserter = Inserter(x=2, y=3, direction=4, name="inserter")
+
+    # Belt runs east along y=4 above the machine, turns south at x=13 so the
+    # tail (13,5) sits opposite the machine's east face across the pickup
+    # inserter at (12,5): drop=(11,5) machine, pickup=(13,5) belt tail.
+    belt = BeltPath(
+        item_id="iron-ore",
+        source_block="block_iron",
+        target_block="block_iron",
+        tier=BeltTier.YELLOW,
+        lane_count=1,
+        segments=tuple(
+            [BeltSegment(x=x, y=4, direction=2, name="transport-belt") for x in range(2, 13)]
+            + [
+                BeltSegment(x=13, y=4, direction=4, name="transport-belt"),
+                BeltSegment(x=13, y=5, direction=4, name="transport-belt"),
+            ]
+        ),
+        undergrounds=(),
+    )
+    pickup_inserter = Inserter(x=12, y=5, direction=6, name="inserter")
+
+    # Output: inserter at (10,7) facing S=4 → pickup=(10,6) machine, drop=(10,8) chest.
+    out_chest = Chest(x=10, y=8, name="wooden-chest", item_id="iron-plate")
+    out_inserter = Inserter(x=10, y=7, direction=4, name="inserter")
+
+    state = _empty_state(canvas)
+    state.placement = placement
+    state.block_graph = bg
+    state.chests = [ore_chest, out_chest]
+    state.inserters = InserterResult(
+        inserters=(feed_inserter, pickup_inserter, out_inserter),
+        boundary_belts=(),
+        unresolved=(),
+    )
+    state.routing = RoutingResult(
+        paths=(belt,),
+        splitters=(),
+        ripup_count=0,
+        unresolved=(),
+        status="OK",
+        canvas=canvas,
+    )
+
+    report = run_simulation(
+        state,
+        target_item="iron-plate",
+        target_rate_per_sec=0.1,
+        warmup_ticks=600,
+        measure_ticks=600,
+    )
+    assert report.total_crafts_by_recipe.get("iron-plate", 0) > 0
+    assert report.achieved_rate_per_sec > 0

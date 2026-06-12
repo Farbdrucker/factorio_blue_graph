@@ -50,8 +50,11 @@ class MachineRuntime:
         if item not in self.inputs_per_craft:
             return 0
         held = self.input_slots.get(item, 0)
-        room = MACHINE_INPUT_CAP - held
-        accepted = min(count, room)
+        # Factorio inserters stop feeding a machine once it buffers a few
+        # crafts' worth of an ingredient. Mirroring that keeps one machine
+        # from hoarding a shared belt's supply while siblings starve.
+        cap = min(MACHINE_INPUT_CAP, 4 * self.inputs_per_craft[item])
+        accepted = min(count, cap - held)
         if accepted > 0:
             self.input_slots[item] = held + accepted
         return accepted

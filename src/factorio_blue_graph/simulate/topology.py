@@ -43,6 +43,9 @@ class Topology:
     belts_from_block: dict[tuple[str, str], list[BeltPathRuntime]] = field(default_factory=dict)
     belts_to_block: dict[tuple[str, str], list[BeltPathRuntime]] = field(default_factory=dict)
     machines_in_block: dict[str, list[MachineRuntime]] = field(default_factory=dict)
+    # Every surface/underground tile of a routed path → its runtime, so the
+    # simulator can resolve inserter pickup/drop tiles that land on belts.
+    belt_by_tile: dict[tuple[int, int], BeltPathRuntime] = field(default_factory=dict)
 
 
 def build_topology(
@@ -137,12 +140,20 @@ def _build_belt_paths(state: PlanState, topo: Topology) -> None:
         topo.belt_paths.append(rt)
         topo.belts_from_block.setdefault((path.source_block, path.item_id), []).append(rt)
         topo.belts_to_block.setdefault((path.target_block, path.item_id), []).append(rt)
+        for seg in path.segments:
+            topo.belt_by_tile[(seg.x, seg.y)] = rt
+        for ug in path.undergrounds:
+            topo.belt_by_tile[(ug.x, ug.y)] = rt
+
+
+_INSERTER_REACH = {"long-handed-inserter": 2}
 
 
 def _build_inserters(state: PlanState, topo: Topology) -> None:
     for ins in state.inserters.inserters:
-        drop_tile = _step(ins.x, ins.y, ins.direction)
-        pickup_tile = _step(ins.x, ins.y, _opposite(ins.direction))
+        reach = _INSERTER_REACH.get(ins.name, 1)
+        drop_tile = _step(ins.x, ins.y, ins.direction, reach)
+        pickup_tile = _step(ins.x, ins.y, _opposite(ins.direction), reach)
         topo.inserters.append(
             InserterRuntime(
                 tile=(ins.x, ins.y),
@@ -155,9 +166,9 @@ def _build_inserters(state: PlanState, topo: Topology) -> None:
         )
 
 
-def _step(x: int, y: int, direction: int) -> tuple[int, int]:
+def _step(x: int, y: int, direction: int, reach: int = 1) -> tuple[int, int]:
     dx, dy = _STEP.get(direction, (0, 0))
-    return (x + dx, y + dy)
+    return (x + dx * reach, y + dy * reach)
 
 
 def _opposite(direction: int) -> int:

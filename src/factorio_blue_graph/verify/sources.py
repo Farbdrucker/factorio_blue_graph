@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from factorio_blue_graph.planning.lp import FLUID_INPUTS
 from factorio_blue_graph.verify.grid import TileGrid
 from factorio_blue_graph.verify.report import Issue, Severity, VerifyReport
 
@@ -38,6 +39,10 @@ def check(
         chests_by_item.setdefault(cell.item_id, []).append(tile)
 
     for ext in flow_graph.external_in_edges:
+        # Fluids arrive by pipe, which the v1 planner does not emit —
+        # same exemption as MISSING_INSERTER in verify/machines.py.
+        if ext.item_id in FLUID_INPUTS:
+            continue
         try:
             block = block_graph.block_of(ext.consumer_node)
         except KeyError:

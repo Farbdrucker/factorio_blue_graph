@@ -84,8 +84,15 @@ class Simulator:
             m.step()
         for b in self._belt_paths:
             b.step(self.tick)
-        for idx, ins in enumerate(self._inserters):
-            self._step_inserter(idx, ins)
+        # Rotate the starting inserter each tick. With a fixed order the
+        # first inserters drain a scarce belt before later ones ever see an
+        # item; on a real belt items flow past busy inserters, so access to
+        # a shared lane is roughly fair.
+        n = len(self._inserters)
+        start = self.tick % n if n else 0
+        for i in range(n):
+            idx = (start + i) % n
+            self._step_inserter(idx, self._inserters[idx])
         self.tick += 1
 
     def _step_inserter(self, idx: int, ins: InserterRuntime) -> None:
@@ -250,11 +257,9 @@ def _resolve_endpoint(topo: Topology, tile: tuple[int, int], *, pickup: bool) ->
     chest = topo.chests.get(tile)
     if chest is not None:
         return _Endpoint(kind="chest", ref=chest)
-    # Belt tails / heads are not yet tile-indexed in this simulator — the v1
-    # CLI emits no belt tiles, and the test-coverage focus is the chest
-    # topology. When Phase 6 is enabled by the heal pass, belts will exist
-    # as ``BeltPathRuntime`` objects but the inserter→belt adjacency is
-    # picked up in a future iteration via the block boundary helpers below.
+    belt = topo.belt_by_tile.get(tile)
+    if belt is not None:
+        return _Endpoint(kind="belt", belt=belt)
     return None
 
 
@@ -273,6 +278,16 @@ def _withdraw(endpoint: _Endpoint | None, count: int) -> tuple[str | None, int]:
             return (None, 0)
         taken = c.take(item, count)
         return (item if taken > 0 else None, taken)
+    if endpoint.kind == "belt" and endpoint.belt is not None:
+        taken = 0
+        item = None
+        for _ in range(count):
+            popped = endpoint.belt.pop()
+            if popped is None:
+                break
+            item = popped
+            taken += 1
+        return (item, taken)
     return (None, 0)
 
 
@@ -285,6 +300,13 @@ def _deposit(endpoint: _Endpoint | None, item: str | None, count: int, tick: int
     if endpoint.kind == "chest":
         c: ChestRuntime = endpoint.ref  # type: ignore[assignment]
         return c.give(item, count)
+    if endpoint.kind == "belt" and endpoint.belt is not None:
+        accepted = 0
+        for _ in range(count):
+            if not endpoint.belt.offer(tick, item):
+                break
+            accepted += 1
+        return accepted
     return 0
 
 
